@@ -1,0 +1,45 @@
+== NMOPSO patrol check: 20261021_162255
+drone 1 transit_in :    4 s, leg; cross-track error mean 0.05 m, max 0.09 m; closest obstacle 1.98 m; altitude 1.78-1.79 m
+drone 1 patrol     :   77 s, 1 lap(s) completed; cross-track error mean 0.06 m, max 0.33 m; closest obstacle 0.80 m; altitude 1.72-1.88 m
+drone 1 transit_out:    4 s, leg; cross-track error mean 0.07 m, max 0.30 m; closest obstacle 1.53 m; altitude 1.78-1.84 m
+drone 2 transit_in :   17 s, leg; cross-track error mean 0.04 m, max 0.17 m; closest obstacle 0.95 m; altitude 1.65-1.85 m
+drone 2 patrol     :   57 s, 1 lap(s) completed; cross-track error mean 0.09 m, max 0.41 m; closest obstacle 0.87 m; altitude 1.62-1.89 m
+drone 2 transit_out:   16 s, leg; cross-track error mean 0.06 m, max 0.28 m; closest obstacle 0.72 m; altitude 1.70-1.85 m
+drone 3 transit_in :    6 s, leg; cross-track error mean 0.06 m, max 0.21 m; closest obstacle 0.92 m; altitude 1.77-1.86 m
+drone 3 patrol     :   70 s, 1 lap(s) completed; cross-track error mean 0.07 m, max 0.31 m; closest obstacle 0.88 m; altitude 1.64-1.89 m
+drone 3 transit_out:    5 s, leg; cross-track error mean 0.11 m, max 0.28 m; closest obstacle 0.76 m; altitude 1.75-1.82 m
+swarm: minimum horizontal separation between drones 3.82 m (whole flight)
+swarm: minimum horizontal separation away from the launch pads 7.36 m
+swarm: minimum 3D separation away from the launch pads 7.36 m
+swarm: minimum horizontal separation at similar altitude (|dz| < 0.6 m) away from the launch pads 7.36 m
+coverage: 92.2 % of the free floor came within 2 m of a drone
+== metrics summary: 20261021_162255  (drone_states.csv at 10 Hz; separation: airborne, away from the pads)
+   battery: PX4 SITL simulator (time-based drain, no current sensor) - no energy figures
+metric                                 1           2           3         all
+flight_time_s                    133.200     113.700     151.300     151.300
+distance_m                        85.565      87.253      80.165     252.983
+mean_speed_mps                     0.642       0.767       0.530            
+max_speed_mps                      1.405       1.478       1.433            
+time_takeoff_s                    36.000      11.400      57.000            
+time_transit_in_s                  4.400      17.100       6.200            
+time_patrol_s                     76.700      57.300      70.400            
+time_transit_out_s                 4.500      16.300       5.100            
+time_land_s                       13.300      13.300      14.700            
+laps                                   1           1           1           3
+holds                                  0           0           0           0
+hold_time_s                            0           0           0           0
+battery_start_pct                 99.424      98.988      99.357            
+battery_end_pct                   50.003      50.003      50.003            
+battery_used_pct                  49.421      48.985      49.354            
+voltage_start_v                   16.171      16.160      16.169            
+voltage_end_v                     15.300      15.300      15.300            
+max_tilt_deg                       7.200       9.570       8.620            
+min_obstacle_clearance_m           0.803       0.716       0.762            
+failsafe_events                        0           0           0           0
+distance_balance                                                       1.088
+min_sep_horizontal_all_m                                               3.817
+min_sep_horizontal_m                                                   7.341
+min_sep_3d_m                                                           7.342
+min_sep_same_level_m                                                   7.341
+samples_valid                       1648        1626        1577        4851
+samples_dropped                        0           0           0           0

@@ -1,0 +1,69 @@
+{
+ "run": "\\\\wsl.localhost\\Ubuntu-24.04\\home\\kali\\patrol_drone_nmopso_auto\\nmopso_demo\\run_logs\\20261021_161837",
+ "drones": {
+  "1": {
+   "samples_airborne": 1569,
+   "min_box_clearance_m": 0.6397327567039219,
+   "at": [
+    -6.19,
+    -6.18,
+    1.87
+   ],
+   "phase": "PATROL",
+   "collision": false,
+   "near_miss": false
+  },
+  "2": {
+   "samples_airborne": 1045,
+   "min_box_clearance_m": 0.85618339156982,
+   "at": [
+    11.37,
+    -4.54,
+    1.66
+   ],
+   "phase": "PATROL",
+   "collision": false,
+   "near_miss": false
+  },
+  "3": {
+   "samples_airborne": 1442,
+   "min_box_clearance_m": 0.7781516561699269,
+   "at": [
+    -0.88,
+    6.26,
+    1.82
+   ],
+   "phase": "TRANSIT_OUT",
+   "collision": false,
+   "near_miss": false
+  }
+ },
+ "pairs": {
+  "1-2": {
+   "samples_both_airborne": 1044,
+   "min_sep_3d_m": 3.9564960508005065,
+   "at_t": 11.6,
+   "min_sep_same_level_m": 3.956010237600505,
+   "collision": false,
+   "near_miss": false
+  },
+  "1-3": {
+   "samples_both_airborne": 1441,
+   "min_sep_3d_m": 4.353226159987556,
+   "at_t": 149.47,
+   "min_sep_same_level_m": 4.349626305787659,
+   "collision": false,
+   "near_miss": false
+  },
+  "2-3": {
+   "samples_both_airborne": 1004,
+   "min_sep_3d_m": 3.8239996077405656,
+   "at_t": 15.4,
+   "min_sep_same_level_m": 3.817121952466282,
+   "collision": false,
+   "near_miss": false
+  }
+ },
+ "any_obstacle_collision": false,
+ "any_drone_collision": false
+}

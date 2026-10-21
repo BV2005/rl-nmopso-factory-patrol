@@ -1,0 +1,47 @@
+t,drone,source,event,phase,detail
+2.00,1,follower,phase,ARM,ARM
+2.10,1,px4,nav_state,ARM,4 -> 14
+2.30,2,follower,phase,ARM,ARM
+2.50,2,px4,nav_state,ARM,4 -> 14
+3.15,1,follower,phase,TAKEOFF,TAKEOFF
+3.20,1,px4,arming_state,TAKEOFF,1 -> 2
+3.40,2,px4,arming_state,ARM,1 -> 2
+3.40,2,follower,phase,TAKEOFF,TAKEOFF
+6.00,1,px4,landed,TAKEOFF,True -> False
+6.10,2,px4,landed,TAKEOFF,True -> False
+7.20,3,follower,phase,ARM,ARM
+7.50,3,px4,nav_state,ARM,4 -> 14
+8.30,3,px4,arming_state,ARM,1 -> 2
+8.35,3,follower,phase,TAKEOFF,TAKEOFF
+11.60,3,px4,landed,TAKEOFF,True -> False
+14.85,2,follower,phase,TRANSIT_IN,TRANSIT_IN
+31.95,2,follower,phase,PATROL,PATROL
+39.20,1,follower,phase,TRANSIT_IN,TRANSIT_IN
+43.55,1,follower,phase,PATROL,PATROL
+65.40,3,follower,phase,TRANSIT_IN,TRANSIT_IN
+71.60,3,follower,phase,PATROL,PATROL
+89.25,2,follower,lap_done,PATROL,1
+89.25,2,follower,phase,TRANSIT_OUT,TRANSIT_OUT
+105.55,2,follower,phase,LAND,LAND
+105.60,2,follower,land_command,LAND,z=1.8 m
+105.70,2,px4,nav_state,LAND,14 -> 18
+118.85,2,follower,phase,DONE,DONE
+119.90,2,px4,landed,DONE,False -> True
+120.25,1,follower,lap_done,PATROL,1
+120.25,1,follower,phase,TRANSIT_OUT,TRANSIT_OUT
+123.00,2,px4,arming_state,DONE,2 -> 1
+123.00,2,px4,nav_state,DONE,18 -> 14
+124.80,1,follower,phase,LAND,LAND
+124.85,1,follower,land_command,LAND,z=1.8 m
+124.90,1,px4,nav_state,LAND,14 -> 18
+138.10,1,follower,phase,DONE,DONE
+139.30,1,px4,landed,DONE,False -> True
+141.80,1,px4,arming_state,DONE,2 -> 1
+141.80,1,px4,nav_state,DONE,18 -> 14
+142.00,3,follower,lap_done,PATROL,1
+142.00,3,follower,phase,TRANSIT_OUT,TRANSIT_OUT
+147.10,3,follower,phase,LAND,LAND
+147.15,3,follower,land_command,LAND,z=1.8 m
+147.20,3,px4,nav_state,LAND,14 -> 18
+161.80,3,follower,phase,DONE,DONE
+163.00,3,px4,landed,DONE,False -> True

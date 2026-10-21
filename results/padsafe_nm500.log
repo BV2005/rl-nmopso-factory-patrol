@@ -1,2 +1,21 @@
 ﻿Starting parallel pool (parpool) using the 'Processes' profile ...
 Connected to parallel pool with 4 workers.
+18 NMOPSO variant jobs (MaxIt 500, warm 0) on 4 workers
+21:22:59  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg001_seed1.mat  322 s, 31 front points
+21:23:01  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg002_seed1.mat  325 s, 50 front points
+21:23:18  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg003_seed1.mat  342 s, 38 front points
+21:23:48  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg004_seed1.mat  371 s, 50 front points
+21:29:10  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg005_seed1.mat  367 s, 50 front points
+21:29:13  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg006_seed1.mat  368 s, 50 front points
+21:29:25  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg007_seed1.mat  363 s, 50 front points
+21:29:58  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg008_seed1.mat  366 s, 50 front points
+21:35:22  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg010_seed1.mat  365 s, 50 front points
+21:35:25  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg009_seed1.mat  371 s, 50 front points
+21:35:44  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg011_seed1.mat  375 s, 50 front points
+21:36:04  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg012_seed1.mat  362 s, 50 front points
+21:41:20  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg014_seed1.mat  352 s, 50 front points
+21:41:21  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg013_seed1.mat  355 s, 50 front points
+21:42:06  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg015_seed1.mat  379 s, 50 front points
+21:42:19  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg016_seed1.mat  371 s, 50 front points
+21:47:25  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg017_seed1.mat  361 s, 50 front points
+21:47:29  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\padsafe_nm500\leg018_seed1.mat  365 s, 50 front points

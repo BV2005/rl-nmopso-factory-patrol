@@ -105,6 +105,27 @@ for all methods; the other 10 are blocked in the planner's model (aisle gaps of 
 NMOPSO never starts on them. RL replans in 1.2\,s and beats NMOPSO-50 + straight (38\,s) on 69\,\%
 of runs (ties 27\,\%, losses 4\,\%), with paths 1.29 vs 1.60$\times$ the straight distance.
 
+\subsection{Gazebo / PX4 SITL flights}
+Three x500 drones fly the factory2\_auto\_full patrol (pads at $(-8,7)$, $(-4,7)$, $(0,7)$, one lap,
+1\,m/s) with the demo's follower and recorder. A first flight of the plan as generated ended in a
+mid-air collision of drones 2 and 3 over drone 3's pad: the layout routes drone 2's transit across
+that pad, where drone 3 climbs and, under the follower's yield rule, holds while the lower-ID drone
+keeps going. With transits re-routed around the other pads (2.6\,m keep-out, legs planned with the
+pads as obstacles: 8.9\,s for 18 legs with RL, 6480\,s with NMOPSO) and departure delays that
+maximise the worst-case same-level separation over $\pm6$\,s timing errors (predicted 3.87\,m),
+both plans flew collision-free:
+\begin{table}[h]\centering\small
+\begin{tabular}{lrr}\toprule
+ & NMOPSO-500 & RL \\\midrule
+distance flown (3 drones) & 285.2\,m & \textbf{253.0\,m}\\
+drone 1 patrol time & 116\,s & \textbf{77\,s}\\
+min obstacle clearance & 0.64\,m & \textbf{0.72\,m}\\
+min drone separation (whole flight) & 3.82\,m & 3.82\,m\\
+max cross-track error & 0.38\,m & 0.41\,m\\
+coverage (2\,m) & 91.8\,\% & 92.2\,\%\\
+failsafes / yield holds & 0 / 0 & 0 / 0\\\bottomrule
+\end{tabular}\end{table}
+
 \subsection{What did not work}
 Preference conditioning (linear scalarisation) and threat-budget conditioning ($F_2\le u\,F_2^{\text{straight}}$,
 with penalties up to 50 per $\sigma_2$) were not learned: the mean action changed by $<0.03$ across the

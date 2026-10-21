@@ -1,0 +1,5 @@
+drone,flight_time_s,distance_m,mean_speed_mps,max_speed_mps,time_takeoff_s,time_transit_in_s,time_patrol_s,time_transit_out_s,time_land_s,laps,holds,hold_time_s,battery_start_pct,battery_end_pct,battery_used_pct,voltage_start_v,voltage_end_v,discharged_mah,energy_wh,energy_j_per_m,mean_current_a,max_tilt_deg,min_obstacle_clearance_m,failsafe_events,distance_balance,min_sep_horizontal_all_m,min_sep_horizontal_m,min_sep_3d_m,min_sep_same_level_m,samples_valid,samples_dropped
+1,133.200,85.565,0.642,1.405,36.000,4.400,76.700,4.500,13.300,1,0,0,99.424,50.003,49.421,16.171,15.300,,,,,7.200,0.803,0,,,,,,1648,0
+2,113.700,87.253,0.767,1.478,11.400,17.100,57.300,16.300,13.300,1,0,0,98.988,50.003,48.985,16.160,15.300,,,,,9.570,0.716,0,,,,,,1626,0
+3,151.300,80.165,0.530,1.433,57.000,6.200,70.400,5.100,14.700,1,0,0,99.357,50.003,49.354,16.169,15.300,,,,,8.620,0.762,0,,,,,,1577,0
+all,151.300,252.983,,,,,,,,3,0,0,,,,,,,,,,,,0,1.088,3.817,7.341,7.342,7.341,4851,0
