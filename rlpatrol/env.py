@@ -16,6 +16,8 @@ Reward: a preference w on the 4-simplex is drawn per episode and observed by the
   terminal  -(w . F / F_SCALE)                     if the path is feasible (all objectives finite)
             -(INFEASIBLE + min(violation, 3))      otherwise (soft violation for a gradient)
   optional  potential-based shaping (shape > 0): Phi = -shape * |q - goal| / PP, Phi = 0 at the end.
+  optional  straight prior (act_pen > 0): -act_pen * |a|^2 every step, so the policy leaves the
+            straight level path only where it pays; a training regulariser, never part of the score.
 """
 import hashlib
 import math
@@ -90,11 +92,11 @@ def sample_pref(B, gen=None, dtype=torch.float64):
 
 
 class PathEnv:
-    def __init__(self, world, start, goal, pref, shape=0.0, scalar="linear"):
+    def __init__(self, world, start, goal, pref, shape=0.0, scalar="linear", act_pen=0.0):
         self.legs = Legs(world, start, goal)
         self.w = world
         self.pref = pref.to(self.legs.dist.dtype)
-        self.shape, self.scalar = shape, scalar
+        self.shape, self.scalar, self.act_pen = shape, scalar, act_pen
         B, dt = len(self.legs), self.legs.dist.dtype
         self.T = torch.eye(4, dtype=dt).repeat(B, 1, 1)                      # chain since startPosition
         self.q = self.legs.start.clone()                                    # last path point (clamped)
@@ -165,6 +167,7 @@ class PathEnv:
 
     def step(self, a):
         phi0 = self.potential()
+        pen = (self.act_pen * a.to(self.T.dtype).pow(2).sum(-1)).float()   # straight prior (training only)
         r, psi, phi = self.act(a)
         self.T = self.T @ tmat(r, phi, psi)
         self.q = self.legs.clamp(self.pose()[:, :3, 3])
@@ -172,9 +175,9 @@ class PathEnv:
         self.i += 1
         done = self.i == N_NODES
         if not done:
-            return (self.potential() - phi0).float(), False, None
+            return (self.potential() - phi0).float() - pen, False, None
         F, viol = self.legs.cost(self.nodes, details=True)
         feas = torch.isfinite(F).all(-1)
         s = self.scalarise(F.nan_to_num(posinf=1e6)).clamp(max=S_MAX)
         rew = torch.where(feas, -s, -(INFEASIBLE + viol.clamp(max=3.0))) - phi0   # Phi(terminal) = 0
-        return rew.float(), True, {"F": F, "feasible": feas}
+        return rew.float() - pen, True, {"F": F, "feasible": feas}

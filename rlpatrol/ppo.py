@@ -1,4 +1,4 @@
-"""Preference-conditioned PPO for the leg-planning MDP (rlpatrol/env.py)."""
+﻿"""Preference-conditioned PPO for the leg-planning MDP (rlpatrol/env.py)."""
 import math
 import time
 from dataclasses import asdict, dataclass
@@ -32,6 +32,7 @@ class Config:
     lmax_long: float = 15.0
     shape: float = 0.0
     scalar: str = "linear"          # linear | tcheby
+    act_pen: float = 0.0            # straight prior: -act_pen * |a|^2 per step
     seed: int = 1
     threads: int = 0                # 0: torch default
 
@@ -82,8 +83,8 @@ def training_legs(world, n, rng, cfg):
                       random_legs(world, n - k, rng, 1.5, cfg.lmax_long)])
 
 
-def rollout(actor, world, legs_m, pref, deterministic=False, shape=0.0, scalar="linear"):
-    env = PathEnv(world, world.to_units(legs_m[:, :3]), world.to_units(legs_m[:, 3:]), pref, shape, scalar)
+def rollout(actor, world, legs_m, pref, deterministic=False, shape=0.0, scalar="linear", act_pen=0.0):
+    env = PathEnv(world, world.to_units(legs_m[:, :3]), world.to_units(legs_m[:, 3:]), pref, shape, scalar, act_pen)
     O, U, LP, R = [], [], [], []
     info = None
     for _ in range(N_NODES):
@@ -126,7 +127,7 @@ def train(world, cfg: Config, log=print, ckpt=None):
         t0 = time.time()
         legs = training_legs(world, cfg.batch, rng, cfg)
         pref = sample_pref(cfg.batch)
-        O, U, LP, R, info, _ = rollout(actor, world, legs, pref, shape=cfg.shape, scalar=cfg.scalar)
+        O, U, LP, R, info, _ = rollout(actor, world, legs, pref, shape=cfg.shape, scalar=cfg.scalar, act_pen=cfg.act_pen)
         B, T = R.shape
         s = R.sum(1).std().item() + 1e-6                     # return normalisation (running)
         ret_scale = s if ret_scale is None else 0.95 * ret_scale + 0.05 * s
