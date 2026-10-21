@@ -1,7 +1,7 @@
 \documentclass[conference]{IEEEtran}
 \usepackage{amsmath,amssymb,graphicx,booktabs,hyperref}
-\title{Amortising Multi-Objective UAV Path Planning with Preference-Conditioned Reinforcement Learning:\\
-A Drop-in Replacement for NMOPSO in Indoor Factory Patrol}
+\title{Reinforcement-Learned Proposals for Multi-Objective UAV Path Planning:\\
+Making NMOPSO Fast Enough for Indoor Factory Patrol}
 \author{\IEEEauthorblockN{Bharath Vaaishnav}}
 \begin{document}
 \maketitle
@@ -11,11 +11,16 @@ Multi-objective particle swarm optimisers such as NMOPSO produce high-quality Pa
 paths but need minutes per leg, which confines them to offline planning. We cast NMOPSO's own
 leg-planning problem---the same spherical path encoding, the same bounds and the same four objectives
 (path length, threat, altitude, smoothness)---as a short-horizon Markov decision process and train a
-single preference-conditioned policy with PPO. At inference the policy returns a Pareto front for an
-unseen leg in milliseconds. On the 73 legs of a three-drone patrol of a 30\,$\times$\,20\,m factory
-(Gazebo world \texttt{factory2}) and 200 held-out random legs, we compare against the authors'
-unmodified NMOPSO, scoring both methods with the authors' cost function. \emph{[Results to be filled
-in from the improvement loop.]}
+single policy with PPO, using a residual action space whose zero action is the straight, level path
+and that maps exactly into NMOPSO's encoding. The policy proposes a set of paths for an unseen leg in
+0.2\,s; kept in an external archive together with a short warm-started NMOPSO run, they form the
+returned front. On the 73 legs of a three-drone patrol of a 30\,$\times$\,20\,m factory (Gazebo world
+\texttt{factory2}), scored with the authors' cost function against the authors' unmodified NMOPSO
+(3 seeds), the RL proposals alone exceed the hypervolume of NMOPSO with 50 iterations by 8.5\,\% at
+1/190 of its time, and the hybrid with 50 NMOPSO iterations exceeds the budget-matched NMOPSO by
+11.4\,\% (68\,\% of runs better, 3\,\% worse). Full NMOPSO (500 iterations) given the straight path
+remains 4.4\,\% better than the hybrid at ten times the cost. We also report what did not work:
+preference and threat-budget conditioning were not learned by PPO in this setting.
 \end{abstract}
 
 \section{Introduction}
@@ -64,7 +69,31 @@ Per leg, objectives are normalised by the ideal and nadir of the union of all fr
 with reference 1.1. We also report the path the patrol pipeline would fly (\emph{short-safe}
 selection) and wall-clock time.
 \subsection{Results}
-\emph{[Tables and figures from the improvement loop.]}
+Table~\ref{tab:main}: 73 real legs, 3 NMOPSO seeds, hypervolume with fixed normalisation (ideal 0,
+nadir $\sigma$, reference 1.1), IGD+ against the union of all fronts of a leg, single-core time per leg
+(\texttt{scripts/final\_compare.py}). All RL path costs re-scored by the authors' \texttt{MyCost.m}
+agree with the training port to $5\cdot10^{-15}$.
+\begin{table}[t]\centering\small
+\caption{Leg planning on the factory2 patrol legs (one training seed; seeds 2--3 pending).}\label{tab:main}
+\begin{tabular}{lrrr}\toprule
+Method & HV & IGD+ & s/leg\\\midrule
+Straight path only & 0.835 & -- & 0\\
+NMOPSO, 50 it. (cold) & 0.437 & 0.452 & 37.7\\
+NMOPSO, 50 it. + straight & 0.901 & 0.149 & 37.7\\
+NMOPSO, 500 it. (authors) & 0.941 & 0.043 & 369\\
+NMOPSO, 500 it. + straight & \textbf{1.050} & \textbf{0.012} & 369\\\midrule
+RL proposals (ours) & 0.978 & 0.097 & \textbf{0.2}\\
+RL $\cup$ NMOPSO-50 cold (ablation) & 0.992 & 0.073 & 37.8\\
+RL-warm NMOPSO-50, archive only & 0.830 & 0.138 & 37.5\\
+RL $\cup$ RL-warm NMOPSO-50 (ours) & 1.003 & 0.064 & 37.5\\\bottomrule
+\end{tabular}\end{table}
+
+\subsection{What did not work}
+Preference conditioning (linear scalarisation) and threat-budget conditioning ($F_2\le u\,F_2^{\text{straight}}$,
+with penalties up to 50 per $\sigma_2$) were not learned: the mean action changed by $<0.03$ across the
+full range of the conditioning input. The low-threat end of the front therefore comes from NMOPSO.
+NMOPSO's own repository discards warm-start paths (grid-based deletion), which is why the external
+archive matters.
 
 \section{Extension: multi-agent persistent patrol}
 \emph{[Planned.]}
