@@ -3,7 +3,7 @@ function run_nmopso_variant(legFile, outDir, seeds, nWorkers, maxIt, warmFile, t
 % from NMOPSO_MAXIT and, when warmFile is given, warm-start particles (rl_factory_patrol hybrid).
 % warmFile (MAT): r, psi, phi [K x M x n] seed paths per leg, cnt [K x 1] (rows used per leg).
 % Same seeds as run_nmopso_legs.m (rng(1000 * s + k)), so cold runs differ from the authors' only in MaxIt.
-% legFile may also hold extra [K x 3] metres: one additional obstacle cylinder per leg (extra_threats).
+% legFile may also hold extra [K x 3m] metres: m additional obstacle cylinders [x y R ...] per leg (extra_threats).
 % timeoutS (default inf): a run still going after timeoutS is cancelled and recorded as
 % <out>_timeout.mat (NMOPSO's initialisation loops until a random particle is feasible).
 P = setup_paths();
@@ -26,7 +26,7 @@ for k = 1:size(I.legs, 1)
         w.r = squeeze(W.r(k, 1:m, :)); w.psi = squeeze(W.psi(k, 1:m, :)); w.phi = squeeze(W.phi(k, 1:m, :));
         if m == 1, w.r = w.r(:)'; w.psi = w.psi(:)'; w.phi = w.phi(:)'; end
     end
-    ex = []; if isfield(I, 'extra'), ex = I.extra(k, :); end
+    ex = []; if isfield(I, 'extra'), ex = reshape(I.extra(k, :), 3, [])'; end   % [m x 3] cylinders
     for s = seeds
         out = fullfile(outDir, sprintf('leg%03d_seed%d.mat', k, s));
         if isfile(out) || isfile(strrep(out, '.mat', '_timeout.mat')), continue, end
