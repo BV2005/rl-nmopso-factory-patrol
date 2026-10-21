@@ -1,0 +1,22 @@
+﻿Starting parallel pool (parpool) using the 'Processes' profile ...
+Connected to parallel pool with 4 workers.
+111 NMOPSO variant jobs (MaxIt 50, warm 0) on 4 workers
+18:59:35  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg001_seed2.mat  51 s, 50 front points
+18:59:35  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg002_seed1.mat  51 s, 50 front points
+18:59:36  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg001_seed1.mat  51 s, 50 front points
+18:59:36  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg001_seed3.mat  51 s, 50 front points
+19:00:20  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg002_seed2.mat  40 s, 50 front points
+19:00:20  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg002_seed3.mat  41 s, 49 front points
+19:00:21  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg003_seed2.mat  41 s, 50 front points
+19:00:22  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg003_seed1.mat  41 s, 50 front points
+19:01:06  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg004_seed1.mat  43 s, 50 front points
+19:01:07  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg003_seed3.mat  43 s, 50 front points
+19:01:07  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg004_seed2.mat  42 s, 50 front points
+19:01:07  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg004_seed3.mat  42 s, 50 front points
+19:01:49  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg005_seed1.mat  39 s, 50 front points
+19:01:49  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg005_seed2.mat  39 s, 43 front points
+19:01:49  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg005_seed3.mat  39 s, 50 front points
+19:06:07  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg006_seed1.mat  TIMEOUT after 300 s
+19:06:49  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg006_seed2.mat  TIMEOUT after 300 s
+19:06:50  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg006_seed3.mat  TIMEOUT after 300 s
+19:06:50  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\obst_cold50\leg007_seed1.mat  TIMEOUT after 300 s

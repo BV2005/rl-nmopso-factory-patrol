@@ -84,6 +84,28 @@ def ray_table(world):
     return tab
 
 
+def direct_rays(world, q, yaw):
+    """exact ray casting from q [B, 3] along N_RAYS directions relative to yaw [B] (the geometry of
+    ray_table, without its grid and direction rounding), / RAY_MAX capped at 1."""
+    th = world.threats
+    ang = yaw[:, None] + torch.arange(N_RAYS, dtype=th.dtype) * (2 * math.pi / N_RAYS)
+    d = torch.stack([torch.cos(ang), torch.sin(ang)], -1)                     # [B, K, 2]
+    o = q[:, None, None, :2] - th[None, None, :, :2]                          # [B, 1, M, 2]
+    R = th[:, 3] + DRONE
+    bq = (o * d[:, :, None]).sum(-1)
+    cq = (o * o).sum(-1) - R ** 2
+    disc = bq ** 2 - cq
+    t = -bq - torch.sqrt(disc.clamp_min(0))
+    t = torch.where((disc >= 0) & (t >= 0), t, torch.full_like(t, math.inf))
+    t = torch.where(cq < 0, torch.zeros_like(t), t)
+    hit = t.min(-1).values
+    lo = torch.as_tensor(world.bounds[[0, 2]], dtype=th.dtype); hi = torch.as_tensor(world.bounds[[1, 3]], dtype=th.dtype)
+    qq = q[:, None, :2]
+    tb = torch.where(d > 0, (hi - qq) / d.clamp_min(1e-9), torch.where(d < 0, (lo - qq) / d.clamp_max(-1e-9), torch.full_like(d, math.inf)))
+    hit = torch.minimum(hit, tb.min(-1).values.clamp_min(0))
+    return (hit / RAY_MAX).clamp(max=1.0).float()
+
+
 def sample_pref(B, gen=None, dtype=torch.float64):
     """uniform on the simplex (Dirichlet(1,1,1,1))."""
     e = -torch.log(torch.rand(B, 4, generator=gen, dtype=dtype).clamp_min(1e-12))
@@ -126,6 +148,8 @@ class PathEnv:
         """distance from q along N_RAYS horizontal directions (relative to yaw) to the first cylinder
         surface inflated by the drone size, or to the map bounds, / RAY_MAX (capped at 1); looked up
         in the precomputed table of ray_table() (1-unit cells, RAY_DIRS global directions)."""
+        if self.w.direct_rays:
+            return direct_rays(self.w, q, yaw)
         tab = ray_table(self.w)
         ix = q[:, 0].round().long().clamp(0, tab.shape[1] - 1)
         iy = q[:, 1].round().long().clamp(0, tab.shape[0] - 1)
