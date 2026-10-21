@@ -33,22 +33,28 @@ class Config:
     shape: float = 0.0
     scalar: str = "linear"          # linear | tcheby
     act_pen: float = 0.0            # straight prior: -act_pen * |a|^2 per step
+    budget: bool = False            # threat-budget conditioning (F2 <= u * F2 of the straight path)
+    u_lo: float = 0.15
+    u_hi: float = 1.2
+    budget_pen: float = 5.0         # reward per F_SCALE[1] of threat above the budget
     seed: int = 1
     threads: int = 0                # 0: torch default
 
 
 class PrefMLP(nn.Module):
-    """MLP whose every hidden layer also sees the preference (the last 4 observation entries)."""
+    """MLP whose every hidden layer also sees the conditioning (the last ctx observation entries:
+    the preference, and the threat budget u when on)."""
 
-    def __init__(self, h, out):
+    def __init__(self, h, out, ctx=4):
         super().__init__()
-        self.l1 = nn.Linear(OBS_DIM, h)
-        self.l2 = nn.Linear(h + 4, h)
-        self.l3 = nn.Linear(h + 4, h)
-        self.out = nn.Linear(h + 4, out)
+        self.ctx = ctx
+        self.l1 = nn.Linear(OBS_DIM + ctx - 4, h)
+        self.l2 = nn.Linear(h + ctx, h)
+        self.l3 = nn.Linear(h + ctx, h)
+        self.out = nn.Linear(h + ctx, out)
 
     def forward(self, o):
-        w = o[..., -4:]
+        w = o[..., -self.ctx:]
         x = torch.tanh(self.l1(o))
         x = torch.tanh(self.l2(torch.cat([x, w], -1)))
         x = torch.tanh(self.l3(torch.cat([x, w], -1)))
@@ -58,9 +64,9 @@ class PrefMLP(nn.Module):
 class Actor(nn.Module):
     """tanh-squashed Gaussian: the action a = tanh(u) is always inside (-1, 1)."""
 
-    def __init__(self, h, log_std0=-1.2):
+    def __init__(self, h, log_std0=-1.2, ctx=4):
         super().__init__()
-        self.mu = PrefMLP(h, 3)
+        self.mu = PrefMLP(h, 3, ctx)
         nn.init.zeros_(self.mu.out.weight); nn.init.zeros_(self.mu.out.bias)   # start at the zero action
         self.log_std = nn.Parameter(torch.full((3,), log_std0))
 
@@ -83,8 +89,19 @@ def training_legs(world, n, rng, cfg):
                       random_legs(world, n - k, rng, 1.5, cfg.lmax_long)])
 
 
-def rollout(actor, world, legs_m, pref, deterministic=False, shape=0.0, scalar="linear", act_pen=0.0):
-    env = PathEnv(world, world.to_units(legs_m[:, :3]), world.to_units(legs_m[:, 3:]), pref, shape, scalar, act_pen)
+def sample_budget_pref(B, cfg, gen=None):
+    """preference over F1, F3, F4 (w2 = 0: threat is a budget) and budget u ~ U(u_lo, u_hi)."""
+    w = sample_pref(B, gen)
+    w[:, 1] = 0
+    w = w / w.sum(-1, keepdim=True)
+    u = cfg.u_lo + (cfg.u_hi - cfg.u_lo) * torch.rand(B, generator=gen, dtype=torch.float64)
+    return w, u
+
+
+def rollout(actor, world, legs_m, pref, deterministic=False, shape=0.0, scalar="linear", act_pen=0.0, budget=None,
+            budget_pen=5.0):
+    env = PathEnv(world, world.to_units(legs_m[:, :3]), world.to_units(legs_m[:, 3:]), pref, shape, scalar, act_pen, budget,
+                  budget_pen)
     O, U, LP, R = [], [], [], []
     info = None
     for _ in range(N_NODES):
@@ -99,9 +116,22 @@ def rollout(actor, world, legs_m, pref, deterministic=False, shape=0.0, scalar="
 def det_probe(actor, world, legs, cfg):
     """deterministic paths on fixed legs: random preferences, and the four corner preferences."""
     n = len(legs)
-    _, _, _, _, info, _ = rollout(actor, world, legs, sample_pref(n, torch.Generator().manual_seed(5)), True)
+    g = torch.Generator().manual_seed(5)
+    if cfg.budget:
+        w, u = sample_budget_pref(n, cfg, g)
+        _, _, _, _, info, _ = rollout(actor, world, legs, w, True, budget=u)
+    else:
+        _, _, _, _, info, _ = rollout(actor, world, legs, sample_pref(n, g), True)
     feas = info["feasible"]; F = info["F"][feas]
     out = {"det_feasible": feas.float().mean().item(), "det_F": F.mean(0).tolist() if len(F) else [math.nan] * 4}
+    if cfg.budget:                       # F2 / straight F2 achieved for a tight and a loose budget
+        w = torch.full((n, 4), 1 / 3, dtype=torch.float64); w[:, 1] = 0
+        out["budget_F2_ratio"] = []
+        for uu in (0.3, 1.0):
+            _, _, _, _, info, env = rollout(actor, world, legs, w, True, budget=torch.full((n,), uu, dtype=torch.float64))
+            ok = info["feasible"] & (env.f2_straight > 0)
+            out["budget_F2_ratio"].append((info["F"][ok, 1] / env.f2_straight[ok]).median().item() if ok.any() else math.nan)
+        return out
     corner = []
     for j in range(4):
         w = torch.zeros(n, 4, dtype=torch.float64); w[:, j] = 1
@@ -118,7 +148,8 @@ def train(world, cfg: Config, log=print, ckpt=None):
         torch.set_num_threads(cfg.threads)
     rng = np.random.default_rng(cfg.seed + 777)       # test legs use seed 12345
     probe_legs = training_legs(world, 1024, np.random.default_rng(999), cfg)
-    actor, crit = Actor(cfg.hidden, cfg.log_std0), PrefMLP(cfg.hidden, 1)
+    ctx = 5 if cfg.budget else 4
+    actor, crit = Actor(cfg.hidden, cfg.log_std0, ctx), PrefMLP(cfg.hidden, 1, ctx)
     opt_a = torch.optim.Adam(actor.parameters(), lr=cfg.lr)
     opt_v = torch.optim.Adam(crit.parameters(), lr=cfg.lr_v)
     ret_scale = None
@@ -126,8 +157,12 @@ def train(world, cfg: Config, log=print, ckpt=None):
     for it in range(cfg.iters):
         t0 = time.time()
         legs = training_legs(world, cfg.batch, rng, cfg)
-        pref = sample_pref(cfg.batch)
-        O, U, LP, R, info, _ = rollout(actor, world, legs, pref, shape=cfg.shape, scalar=cfg.scalar, act_pen=cfg.act_pen)
+        if cfg.budget:
+            pref, bud = sample_budget_pref(cfg.batch, cfg)
+        else:
+            pref, bud = sample_pref(cfg.batch), None
+        O, U, LP, R, info, _ = rollout(actor, world, legs, pref, shape=cfg.shape, scalar=cfg.scalar,
+                                       act_pen=cfg.act_pen, budget=bud, budget_pen=cfg.budget_pen)
         B, T = R.shape
         s = R.sum(1).std().item() + 1e-6                     # return normalisation (running)
         ret_scale = s if ret_scale is None else 0.95 * ret_scale + 0.05 * s
@@ -168,7 +203,9 @@ def train(world, cfg: Config, log=print, ckpt=None):
         if it % 10 == 0 or it == cfg.iters - 1:
             row.update(det_probe(actor, world, probe_legs, cfg))
             log(f"it {it:4d}  return {row['ret']:+.3f}  feas {feas*100:5.1f} %  det feas {row['det_feasible']*100:5.1f} %  "
-                f"det F {np.round(row['det_F'], 4).tolist()}  corner F_j {np.round(row['corner_Fj'], 4).tolist()}  "
+                f"det F {np.round(row['det_F'], 4).tolist()}  "
+                + (f"F2/straight at u=0.3,1.0 {np.round(row['budget_F2_ratio'], 3).tolist()}  " if cfg.budget else
+                   f"corner F_j {np.round(row['corner_Fj'], 4).tolist()}  ") +
                 f"kl {kl:.3f} ep {ep + 1}  std {np.round(row['std'], 3).tolist()}  {row['sec']:.1f} s")
         hist.append(row)
         if ckpt and (it % 25 == 0 or it == cfg.iters - 1):

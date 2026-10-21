@@ -1,10 +1,17 @@
 ﻿"""Evaluates a trained policy against the authors' NMOPSO on a benchmark leg set.
-  python scripts/evaluate.py --ckpt results/ckpt/v0.pt --legs real [--nmopso results/nmopso_real]
-RL front of a leg: deterministic paths for K preferences plus S stochastic samples each, the feasible
-non-dominated ones. NMOPSO front: the final repository of each seed (scored by MATLAB MyCost.m).
-Per leg the objectives are normalised by the ideal / nadir of the union of all fronts of that leg
-(RL and every NMOPSO seed); hypervolume uses the reference point 1.1 in every objective.
-Writes results/eval_<ckpt>_<legs>.json and the RL solutions for MATLAB re-scoring (matlab/eval_mycost.m)."""
+  python scripts/evaluate.py --ckpt results/ckpt/v3.pt --legs real [--nmopso results/nmopso_real] [--refine]
+Fronts per leg (all feasible, non-dominated, scored with the MyCost port; re-scored by MATLAB via
+the saved solutions):
+  rl         policy rollouts (deterministic + S samples per condition) plus the straight path
+  rl_ls      rl plus a short CEM refinement of its paths (--refine; rlpatrol/refine.py)
+  straight   the straight, level path alone (the zero action; 1 evaluation)
+  random     uniform random NMOPSO particles, same count as rl
+  nm<s>      NMOPSO's final repository, seed s; nm<s>+straight adds the straight path
+Conditions: budget-conditioned checkpoints sweep U_SWEEP threat budgets x BUDGET_PREFS; others use
+K preferences (corners, edge midpoints, centroid, Dirichlet samples).
+Metrics: hypervolume with fixed normalisation (ideal 0, nadir F_SCALE, reference 1.1); IGD+ against
+the union of every front of the leg (normalised by F_SCALE); additive epsilon to attain NMOPSO's
+deployed (short-safe) path; RL vs NMOPSO+straight wins / ties / losses at a 1e-3 HV tolerance."""
 import argparse
 import json
 import sys
@@ -18,12 +25,17 @@ from scipy.io import loadmat, savemat
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from rlpatrol.env import F_SCALE, PathEnv  # noqa: E402
-from rlpatrol.metrics import hypervolume, nondominated, short_safe  # noqa: E402
+from rlpatrol.metrics import add_eps, hypervolume, igd_plus, nondominated, short_safe  # noqa: E402
 from rlpatrol.nmopso_cost import ANGLE, N_NODES, Legs  # noqa: E402
 from rlpatrol.ppo import Actor  # noqa: E402
+from rlpatrol.refine import WEIGHTS, cem  # noqa: E402
 from rlpatrol.world import DATA, load_world  # noqa: E402
 
 REF = 1.1
+TIE = 1e-3
+U_SWEEP = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+BUDGET_PREFS = [[1, 0, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1], [1 / 3, 0, 1 / 3, 1 / 3]]
+SCALE = F_SCALE.numpy()
 
 
 def pref_set(K, seed=0):
@@ -33,20 +45,28 @@ def pref_set(K, seed=0):
     rng = np.random.default_rng(seed)
     while len(P) < K:
         P.append(rng.dirichlet(np.ones(4)))
-    return torch.tensor(np.array(P[:K]))
+    return np.array(P[:K])
 
 
-def rl_solve(actor, world, legs_m, K, S, seed=0):
-    """all legs at once: returns per leg (F [m, 4], enc [m, 3, n]) of all rollouts, and the wall time."""
-    P = pref_set(K)
+def conditions(budget, K):
+    """(prefs [C, 4], budgets [C] or None)."""
+    if budget:
+        P = np.array([p for _ in U_SWEEP for p in BUDGET_PREFS], float)
+        return P, np.repeat(U_SWEEP, len(BUDGET_PREFS)).astype(float)
+    return pref_set(K), None
+
+
+def rl_solve(actor, world, legs_m, prefs, budgets, S, seed=0):
+    """all legs at once: per leg (F [m, 4], enc [m, 3, n]) of all rollouts (actor None: zero action),
+    and the wall time."""
     torch.manual_seed(seed)
-    nL = len(legs_m)
-    rep = 1 + S
-    Lr = np.repeat(legs_m, K * rep, 0)
-    pr = P.repeat(rep, 1).repeat(nL, 1)
-    det = torch.tensor(([True] * K + [False] * K * S) * nL)
+    C, nL, rep = len(prefs), len(legs_m), 1 + S
+    Lr = np.repeat(legs_m, C * rep, 0)
+    pr = torch.tensor(np.tile(np.tile(prefs, (rep, 1)), (nL, 1)))
+    bu = None if budgets is None else torch.tensor(np.tile(np.tile(budgets, rep), nL))
+    det = torch.tensor(([True] * C + [False] * C * S) * nL)
     t0 = time.perf_counter()
-    env = PathEnv(world, world.to_units(Lr[:, :3]), world.to_units(Lr[:, 3:]), pr)
+    env = PathEnv(world, world.to_units(Lr[:, :3]), world.to_units(Lr[:, 3:]), pr, budget=bu)
     enc = []
     for _ in range(N_NODES):
         with torch.no_grad():
@@ -57,7 +77,7 @@ def rl_solve(actor, world, legs_m, K, S, seed=0):
     F = env.legs.cost(env.nodes).numpy()
     wall = time.perf_counter() - t0
     enc = torch.stack(enc, -1).numpy()                              # [B, 3, n]
-    m = K * rep
+    m = C * rep
     return [(F[i * m:(i + 1) * m], enc[i * m:(i + 1) * m]) for i in range(nL)], wall
 
 
@@ -82,20 +102,37 @@ def load_nmopso(d, nL):
     return out
 
 
-def path_metrics(world, leg, F_enc):
-    """length (m) of the decoded path start -> nodes -> goal."""
-    from rlpatrol.nmopso_cost import Legs
+def path_len_m(world, leg, e):
     lg = Legs(world, world.to_units(leg[None, :3]), world.to_units(leg[None, 3:]))
-    e = torch.tensor(F_enc)[None]
+    e = torch.tensor(e)[None]
     nodes = lg.decode(e[:, 0], e[:, 1], e[:, 2])
     P = torch.cat([lg.start[:, None], nodes, lg.goal[:, None]], 1)[0].numpy() / world.scale
     return float(np.linalg.norm(np.diff(P, axis=0), axis=1).sum())
 
 
-def hv_fixed(F):
-    """hypervolume with fixed normalisation: ideal 0, nadir F_SCALE (p95 of NMOPSO fronts), ref 1.1."""
+def feasible_front(F):
+    F = np.asarray(F, float)
     F = F[np.isfinite(F).all(1)] if len(F) else F
-    return hypervolume(F / F_SCALE.numpy(), np.full(4, REF)) if len(F) else 0.0
+    return nondominated(F) if len(F) else np.zeros((0, 4))
+
+
+def hv(F):
+    return hypervolume(F / SCALE, np.full(4, REF)) if len(F) else 0.0
+
+
+def refine(world, legs_m, sols):
+    """RL+LS: CEM from the RL front's lowest-threat, short-safe and lowest (F1, F3, F4) paths."""
+    starts = []
+    for F, enc in sols:
+        ok = np.where(np.isfinite(F).all(1))[0]
+        if len(ok) == 0:
+            ok = np.arange(len(F))
+            Fo = np.nan_to_num(F, posinf=1e3)
+        else:
+            Fo = F[ok]
+        picks = [ok[np.argmin(Fo[:, 1])], ok[short_safe(Fo)], ok[np.argmin((Fo[:, [0, 2, 3]] / SCALE[[0, 2, 3]]).sum(1))]]
+        starts.append(enc[picks])
+    return cem(world, legs_m, np.stack(starts), F_SCALE.to(torch.float64))
 
 
 def main():
@@ -105,56 +142,88 @@ def main():
     ap.add_argument("--nmopso", default=None)
     ap.add_argument("--K", type=int, default=50)
     ap.add_argument("--S", type=int, default=3)
+    ap.add_argument("--refine", action="store_true")
     ap.add_argument("--threads", type=int, default=4)
     a = ap.parse_args()
     torch.set_num_threads(a.threads)
     world = load_world()
     legs_m = loadmat(DATA / f"legs_{a.legs}.mat")["legs"]
     ck = torch.load(a.ckpt, weights_only=False)
-    actor = Actor(ck["cfg"]["hidden"]); actor.load_state_dict(ck["actor"]); actor.eval()
-    sols, wall = rl_solve(actor, world, legs_m, a.K, a.S)
-    # single-leg latency (one leg, all K * (1 + S) rollouts)
-    t0 = time.perf_counter(); rl_solve(actor, world, legs_m[:1], a.K, a.S); lat = time.perf_counter() - t0
-    straight, _ = rl_solve(None, world, legs_m, 1, 0)
-    rand = random_search(world, legs_m, a.K * (1 + a.S))
+    budget = ck["cfg"].get("budget", False)
+    actor = Actor(ck["cfg"]["hidden"], ctx=5 if budget else 4); actor.load_state_dict(ck["actor"]); actor.eval()
+    prefs, budgets = conditions(budget, a.K)
+    sols, wall = rl_solve(actor, world, legs_m, prefs, budgets, a.S)
+    t0 = time.perf_counter(); rl_solve(actor, world, legs_m[:1], prefs, budgets, a.S); lat = time.perf_counter() - t0
+    straight, _ = rl_solve(None, world, legs_m, prefs[:1], None if budgets is None else budgets[:1], 0)
+    sols = [(np.vstack([F, straight[k][0]]), np.concatenate([e, straight[k][1]])) for k, (F, e) in enumerate(sols)]
+    n_rl = len(sols[0][0])
+    rand = random_search(world, legs_m, n_rl)
+    ls = None
+    if a.refine:
+        t0 = time.perf_counter(); lsF, lsE = refine(world, legs_m, sols); ls_wall = time.perf_counter() - t0
+        ls = [(np.vstack([sols[k][0], lsF[k]]), np.concatenate([sols[k][1], lsE[k]])) for k in range(len(sols))]
     nm = load_nmopso(a.nmopso, len(legs_m)) if a.nmopso else {}
+    seeds = sorted({s for v in nm.values() for s in v})
     rows = []
-    for k, (F, enc) in enumerate(sols):
-        # the policy's default (zero action = straight, level path) is always one candidate
-        F = np.vstack([F, straight[k][0]]); enc = np.concatenate([enc, straight[k][1]])
-        sols[k] = (F, enc)
+    for k in range(len(legs_m)):
+        F, enc = sols[k]
         feas = np.isfinite(F).all(1)
-        row = dict(leg=k, rl_feasible_frac=float(feas.mean()), rl_front=len(nondominated(F[feas])) if feas.any() else 0)
+        fr = {"rl": feasible_front(F), "straight": feasible_front(straight[k][0]), "random": feasible_front(rand[k])}
+        if ls:
+            fr["rl_ls"] = feasible_front(ls[k][0])
+        picks = {}
+        for s, (f, t) in nm.get(k, {}).items():
+            fr[f"nm{s}"] = feasible_front(f)
+            fr[f"nm{s}+straight"] = feasible_front(np.vstack([f, straight[k][0]]))
+            if len(fr[f"nm{s}"]):
+                picks[s] = fr[f"nm{s}"][short_safe(fr[f"nm{s}"])]
+        row = dict(leg=k, rl_feasible_frac=float(feas.mean()), rl_front=len(fr["rl"]),
+                   **{f"nm{s}_time_s": t for s, (_, t) in nm.get(k, {}).items()})
         if feas.any():
             j = np.where(feas)[0][short_safe(F[feas])]
-            row["rl_pick_F"] = F[j].tolist(); row["rl_pick_len_m"] = path_metrics(world, legs_m[k], enc[j])
-        row["hv_rl"] = hv_fixed(F)
-        row["hv_rl_det"] = hv_fixed(F[:a.K])
-        row["hv_straight"] = hv_fixed(straight[k][0])
-        row["hv_random"] = hv_fixed(rand[k])
-        for s, (fr, t) in nm.get(k, {}).items():
-            row[f"hv_nm{s}"] = hv_fixed(fr)
-            row[f"nm{s}_time_s"] = t
+            row["rl_pick_F"] = F[j].tolist(); row["rl_pick_len_m"] = path_len_m(world, legs_m[k], enc[j])
+        ref = feasible_front(np.vstack([f for f in fr.values() if len(f)])) / SCALE if any(len(f) for f in fr.values()) else None
+        for name, f in fr.items():
+            row[f"hv_{name}"] = hv(f)
+            if ref is not None:
+                row[f"igd_{name}"] = igd_plus(f / SCALE, ref)
+            for s, p in picks.items():                                # attain NMOPSO seed s's deployed path
+                row[f"eps_{name}_to_nm{s}pick"] = add_eps(f / SCALE, p / SCALE)
         rows.append(row)
-    res = dict(ckpt=a.ckpt, legs=a.legs, K=a.K, S=a.S, rl_wall_all_s=wall, rl_latency_one_leg_s=lat, rows=rows)
-    seeds = sorted({s for v in nm.values() for s in v})
-    m = lambda key, R=rows: float(np.mean([r[key] for r in R]))
-    summ = {"legs": len(rows), "rl_legs_with_feasible": int(sum(r["rl_feasible_frac"] > 0 for r in rows)),
-            "rl_feasible_frac_mean": m("rl_feasible_frac"), "rl_latency_one_leg_s": lat,
-            "hv_rl": m("hv_rl"), "hv_rl_det": m("hv_rl_det"), "hv_straight": m("hv_straight"), "hv_random": m("hv_random")}
+
+    def mean(key, R):
+        v = [r[key] for r in R if key in r and np.isfinite(r[key])]
+        return float(np.mean(v)) if v else None
+
+    methods = ["rl", "straight", "random"] + (["rl_ls"] if ls else [])
+    summ = {"legs": len(rows), "conditions": len(prefs), "S": a.S, "rl_evals_per_leg": n_rl,
+            "rl_ls_evals_per_leg": n_rl + (len(WEIGHTS) * 64 * 3 if ls else 0),
+            "rl_legs_with_feasible": int(sum(r["rl_feasible_frac"] > 0 for r in rows)),
+            "rl_latency_one_leg_s": lat, "rl_wall_all_legs_s": wall, **({"rl_ls_wall_all_legs_s": ls_wall} if ls else {}),
+            **{f"hv_{m}": mean(f"hv_{m}", rows) for m in methods}}
     both = [r for r in rows if all(f"hv_nm{s}" in r for s in seeds)] if seeds else []
     if both:
-        hr = np.array([r["hv_rl"] for r in both]); hn = np.array([[r[f"hv_nm{s}"] for s in seeds] for r in both])
-        summ.update({"legs_compared": len(both), "nm_seeds": seeds, "on_compared_hv_rl": float(hr.mean()),
-                     "on_compared_hv_nmopso": float(hn.mean()),
-                     "on_compared_hv_random": m("hv_random", both), "on_compared_hv_straight": m("hv_straight", both),
-                     "rl_beats_nmopso_seed_frac": float((hr[:, None] > hn).mean()),
-                     "nmopso_time_per_leg_s_median": float(np.median([r[f"nm{s}_time_s"] for r in both for s in seeds]))})
-    res["summary"] = summ
-    out = ROOT / "results" / f"eval_{Path(a.ckpt).stem}_{a.legs}.json"
-    out.write_text(json.dumps(res, indent=1))
-    enc = np.concatenate([e for _, e in sols]); legi = np.repeat(np.arange(len(sols)) + 1, len(sols[0][1]))
-    savemat(ROOT / "results" / f"rl_solutions_{Path(a.ckpt).stem}_{a.legs}.mat",
+        cmp = {"legs_compared": len(both), "nm_seeds": seeds,
+               "nmopso_time_per_leg_s_median": float(np.median([r[f"nm{s}_time_s"] for r in both for s in seeds]))}
+        for m in methods + ["nm", "nm+straight"]:
+            keys = [f"hv_nm{s}" for s in seeds] if m == "nm" else [f"hv_nm{s}+straight" for s in seeds] if m == "nm+straight" else [f"hv_{m}"]
+            cmp[f"hv_{m}"] = float(np.mean([[r[k] for k in keys] for r in both]))
+            ik = [k.replace("hv_", "igd_") for k in keys]
+            cmp[f"igd_{m}"] = float(np.mean([[r[k] for k in ik] for r in both]))
+        for m in methods:
+            for base in ("nm", "nm+straight"):
+                d = np.array([[r[f"hv_{m}"] - r[f"hv_nm{s}{'+straight' if base != 'nm' else ''}"] for s in seeds] for r in both])
+                cmp[f"{m}_vs_{base}_win_tie_loss"] = [float((d > TIE).mean()), float((abs(d) <= TIE).mean()), float((d < -TIE).mean())]
+            e = np.array([r[f"eps_{m}_to_nm{s}pick"] for r in both for s in seeds if f"eps_{m}_to_nm{s}pick" in r])
+            cmp[f"{m}_attains_nmopso_pick_frac"] = float((e <= 1e-9).mean())
+            cmp[f"{m}_eps_to_nmopso_pick_median"] = float(np.median(e))
+        summ["compared"] = cmp
+    res = dict(ckpt=a.ckpt, legs=a.legs, summary=summ, rows=rows)
+    tag = f"{Path(a.ckpt).stem}_{a.legs}" + ("_ls" if ls else "")
+    (ROOT / "results" / f"eval_{tag}.json").write_text(json.dumps(res, indent=1))
+    src = ls if ls else sols
+    enc = np.concatenate([e for _, e in src]); legi = np.concatenate([np.full(len(e), k + 1) for k, (_, e) in enumerate(src)])
+    savemat(ROOT / "results" / f"rl_solutions_{tag}.mat",
             {"legs": legs_m, "leg": legi[:, None].astype(float), "r": enc[:, 0], "psi": enc[:, 1], "phi": enc[:, 2]})
     print(json.dumps(summ, indent=1))
 
