@@ -1,0 +1,60 @@
+{
+ "legs": 37,
+ "seeds": [
+  1,
+  2,
+  3
+ ],
+ "obstacle_half_width_m": 0.3,
+ "model_radius_m": 0.7,
+ "original_path_hits_new_obstacle_frac": {
+  "rl": 0.8918918918918919,
+  "nm500+straight": 0.8648648648648649
+ },
+ "nmopso_timeout_frac": {
+  "cold50+straight": 0.2702702702702703,
+  "hybrid": 0.2702702702702703
+ },
+ "replan": {
+  "rl": {
+   "success_frac": 0.7297297297297297,
+   "time_median_s": 1.2355804000981152,
+   "hv_mean": 0.34207753124842866,
+   "length_ratio_mean": 1.2924290269950924,
+   "clearance_p5_m": 0.4837257117806578,
+   "clearance_median_m": 0.800000000000001,
+   "collides_frac": 0.0,
+   "max_turn_deg_mean": 45.61254908251077,
+   "vs_cold50+straight_win_tie_loss": [
+    0.6936936936936937,
+    0.2702702702702703,
+    0.036036036036036036
+   ]
+  },
+  "cold50+straight": {
+   "success_frac": 0.7297297297297297,
+   "time_median_s": 38.3296056,
+   "hv_mean": 0.14328141230027064,
+   "length_ratio_mean": 1.6019403831844792,
+   "clearance_p5_m": 0.4513948365169722,
+   "clearance_median_m": 0.800000000000001,
+   "collides_frac": 0.0,
+   "max_turn_deg_mean": 84.4756627727182
+  },
+  "hybrid": {
+   "success_frac": 0.7297297297297297,
+   "time_median_s": 39.87846839999877,
+   "hv_mean": 0.38218340026837483,
+   "length_ratio_mean": 1.470854688468287,
+   "clearance_p5_m": 0.41555027972459707,
+   "clearance_median_m": 0.800000000000001,
+   "collides_frac": 0.0,
+   "max_turn_deg_mean": 72.44511241498196,
+   "vs_cold50+straight_win_tie_loss": [
+    0.7117117117117117,
+    0.2702702702702703,
+    0.018018018018018018
+   ]
+  }
+ }
+}
