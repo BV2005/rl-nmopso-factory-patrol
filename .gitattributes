@@ -13,3 +13,6 @@
 *.png binary
 *.jpg binary
 *.tif binary
+# third-party code is kept byte-for-byte as distributed
+third_party/** -text
+matlab/nmopso_variant/** -text
