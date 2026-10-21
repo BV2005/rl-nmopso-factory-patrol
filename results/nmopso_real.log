@@ -1,3 +1,19 @@
 ﻿Starting parallel pool (parpool) using the 'Processes' profile ...
 Connected to parallel pool with 8 workers.
 219 NMOPSO jobs on 8 workers
+11:25:41  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg001_seed1.mat  507 s, 50 front points
+11:25:46  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg001_seed3.mat  511 s, 44 front points
+11:25:51  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg003_seed2.mat  517 s, 50 front points
+11:25:55  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg003_seed1.mat  520 s, 50 front points
+11:25:56  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg001_seed2.mat  522 s, 50 front points
+11:26:33  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg002_seed3.mat  559 s, 50 front points
+11:26:34  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg002_seed2.mat  560 s, 50 front points
+11:26:36  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg002_seed1.mat  562 s, 50 front points
+11:34:53  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg003_seed3.mat  547 s, 50 front points
+11:35:02  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg004_seed3.mat  542 s, 27 front points
+11:35:09  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg004_seed1.mat  557 s, 50 front points
+11:35:16  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg004_seed2.mat  559 s, 50 front points
+11:35:42  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg005_seed1.mat  579 s, 50 front points
+11:36:05  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg005_seed2.mat  567 s, 40 front points
+11:36:20  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg005_seed3.mat  580 s, 49 front points
+11:36:48  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\nmopso_real\leg006_seed1.mat  606 s, 50 front points
