@@ -1,15 +1,21 @@
-"""Leg-planning MDP over NMOPSO's own path encoding, batched in PyTorch.
+﻿"""Leg-planning MDP over NMOPSO's own path encoding, batched in PyTorch.
 
-An episode builds one path of n = 10 nodes. Step i chooses node i's (r, psi, phi) in NMOPSO.m's
+An episode builds one path of n = 10 nodes. Step i outputs node i's (r, psi, phi) in NMOPSO.m's
 bounds (r in [VarMin.r, VarMax.r], psi and phi in [-pi/4, pi/4]), decoded exactly as
 SphericalToCart2.m does (chained transforms from the start pose, clamped to the map). The episode
 ends after node n; the path is closed to the goal and scored with MyCost.m (ported).
 
+Action (residual, a in (-1, 1)^3): the zero action is "straight at the goal, level at the band
+centre". a_r scales the even-spacing step length (r_nom = |goal - p| / segments left) by
+exp(SIG_R a_r); a_yaw turns the world bearing from the goal bearing by a_yaw * YAW_MAX; a_z sets the
+height the step aims for, band centre + a_z * half band. The world direction is converted exactly to
+the chain's local (phi, psi) (Rz(phi) Ry(-psi) e_x = d_local) and clipped to NMOPSO's bounds, so every
+path is an ordinary NMOPSO particle.
+
 Reward: a preference w on the 4-simplex is drawn per episode and observed by the policy.
   terminal  -(w . F / F_SCALE)                     if the path is feasible (all objectives finite)
-            -(INFEASIBLE + violation)              otherwise (soft violation for a gradient)
-  every step  potential-based shaping Phi(s') - Phi(s), Phi = -SHAPE * |q - goal| / PP and
-            Phi = 0 at the end, so the optimal policy is unchanged (Ng et al. 1999).
+            -(INFEASIBLE + min(violation, 3))      otherwise (soft violation for a gradient)
+  optional  potential-based shaping (shape > 0): Phi = -shape * |q - goal| / PP, Phi = 0 at the end.
 """
 import hashlib
 import math
@@ -25,8 +31,9 @@ RAY_MAX = 40.0                         # units (4 m)
 F_SCALE = torch.tensor([0.5, 0.02, 1.0, 0.2])   # p95 of NMOPSO's fronts on the factory2_auto plan (scripts/front_stats.py)
 S_MAX = 5.0                                      # scaled cost of a feasible path is capped here
 INFEASIBLE = S_MAX + 1.0                         # so any feasible path beats any infeasible one
-SHAPE = 0.5
-OBS_DIM = 3 + 3 + 1 + 1 + 1 + 1 + N_RAYS + 4
+SIG_R = 1.0                                      # a_r = +-1: step length x e^+-1
+YAW_MAX = math.pi / 2                            # a_yaw = +-1: +-90 deg from the goal bearing
+OBS_DIM = 3 + 1 + 1 + 3 + 1 + 1 + 1 + 2 + N_RAYS + 4
 
 
 RAY_DIRS = 64
@@ -80,24 +87,27 @@ def sample_pref(B, gen=None, dtype=torch.float64):
     return e / e.sum(-1, keepdim=True)
 
 
+
+
 class PathEnv:
-    def __init__(self, world, start, goal, pref):
+    def __init__(self, world, start, goal, pref, shape=0.0, scalar="linear"):
         self.legs = Legs(world, start, goal)
         self.w = world
         self.pref = pref.to(self.legs.dist.dtype)
+        self.shape, self.scalar = shape, scalar
         B, dt = len(self.legs), self.legs.dist.dtype
         self.T = torch.eye(4, dtype=dt).repeat(B, 1, 1)                      # chain since startPosition
         self.q = self.legs.start.clone()                                    # last path point (clamped)
         self.nodes = torch.zeros(B, N_NODES, 3, dtype=dt)
         self.i = 0
-        ang = torch.arange(N_RAYS, dtype=dt) * (2 * math.pi / N_RAYS)
-        self.ray_dir = torch.stack([torch.cos(ang), torch.sin(ang)], -1)   # local frame
+        self.zmid = (self.legs.lo[2] + self.legs.hi[2]) / 2
+        self.zhalf = (self.legs.hi[2] - self.legs.lo[2]) / 2
 
     def pose(self):
         return self.legs.T0 @ self.T
 
     def potential(self):
-        return -SHAPE * (self.q - self.legs.goal).norm(dim=-1) / self.legs.dist
+        return -self.shape * (self.q - self.legs.goal).norm(dim=-1) / self.legs.dist
 
     def rays(self, q, yaw):
         """distance from q along N_RAYS horizontal directions (relative to yaw) to the first cylinder
@@ -110,25 +120,48 @@ class PathEnv:
         dk = (yaw / (2 * math.pi / RAY_DIRS)).round().long()
         return tab[iy[:, None], ix[:, None], (k[None] + dk[:, None]) % RAY_DIRS]
 
+    def segs_left(self):
+        return N_NODES - self.i + 1                                         # this node ... goal
+
     def obs(self):
         P = self.pose()
         R, p = P[:, :3, :3], P[:, :3, 3]
         D = self.legs.dist[:, None]
-        g = (R.transpose(1, 2) @ (self.legs.goal - self.q)[..., None])[..., 0] / D
-        off = (R.transpose(1, 2) @ (p - self.q)[..., None])[..., 0] / D
-        zlo, zhi = self.legs.lo[2], self.legs.hi[2]
-        zb = (self.q[:, 2:3] - (zlo + zhi) / 2) / ((zhi - zlo) / 2)
+        gv = self.legs.goal - p
+        g = (R.transpose(1, 2) @ gv[..., None])[..., 0] / D                 # goal, chain frame
+        reach = gv.norm(dim=-1, keepdim=True) / (self.segs_left() * self.legs.rmax[:, None])
+        zc = ((p[:, 2:3] - self.zmid) / self.zhalf).clamp(-5, 5)            # unclamped chain height
+        off = ((self.q - p) / 10).clamp(-2, 2)                              # clamping offset (m)
         left = torch.full_like(D, (N_NODES - self.i) / N_NODES)
-        yaw = torch.atan2(R[:, 1, 0], R[:, 0, 0])
-        o = torch.cat([g, off.clamp(-2, 2), zb, left, D / 100, self.legs.rmax[:, None] / RAY_MAX,
-                       self.rays(self.q, yaw), self.pref], -1)
+        bear = torch.atan2(self.legs.goal[:, 1] - self.q[:, 1], self.legs.goal[:, 0] - self.q[:, 0])
+        head = torch.atan2(R[:, 1, 0], R[:, 0, 0]) - bear                   # chain heading vs goal bearing
+        o = torch.cat([g, reach, zc, off, left, D / 100, self.legs.rmax[:, None] / RAY_MAX,
+                       torch.cos(head)[:, None], torch.sin(head)[:, None],
+                       self.rays(self.q, bear), self.pref], -1)
         return o.float()
 
     def act(self, a):
-        """a [B, 3] in [-1, 1] -> (r, psi, phi) in NMOPSO's bounds."""
+        """residual a [B, 3] in [-1, 1] -> (r, psi, phi) in NMOPSO's bounds (see module doc)."""
         a = a.to(self.T.dtype).clamp(-1, 1)
-        r = self.legs.rmin + (a[:, 0] + 1) / 2 * (self.legs.rmax - self.legs.rmin)
-        return r, a[:, 1] * ANGLE, a[:, 2] * ANGLE
+        P = self.pose()
+        R, p = P[:, :3, :3], P[:, :3, 3]
+        gv = self.legs.goal - p
+        r_nom = gv.norm(dim=-1) / self.segs_left()
+        r = torch.minimum(torch.maximum(r_nom * torch.exp(SIG_R * a[:, 0]), self.legs.rmin * 1.001), self.legs.rmax)
+        yaw = torch.atan2(gv[:, 1], gv[:, 0]) + a[:, 1] * YAW_MAX
+        dz = self.zmid + a[:, 2] * self.zhalf - p[:, 2]
+        el = torch.asin((dz / r).clamp(-1, 1))
+        d = torch.stack([torch.cos(el) * torch.cos(yaw), torch.cos(el) * torch.sin(yaw), torch.sin(el)], -1)
+        dl = (R.transpose(1, 2) @ d[..., None])[..., 0]
+        phi = torch.atan2(dl[:, 1], dl[:, 0]).clamp(-ANGLE, ANGLE)
+        psi = torch.atan2(dl[:, 2], dl[:, :2].norm(dim=-1)).clamp(-ANGLE, ANGLE)
+        return r, psi, phi
+
+    def scalarise(self, F):
+        Fs = F / F_SCALE.to(F.dtype)
+        if self.scalar == "tcheby":                                         # augmented Tchebycheff
+            return (self.pref * Fs).max(-1).values + 0.05 * (self.pref * Fs).sum(-1)
+        return (self.pref * Fs).sum(-1)
 
     def step(self, a):
         phi0 = self.potential()
@@ -142,6 +175,6 @@ class PathEnv:
             return (self.potential() - phi0).float(), False, None
         F, viol = self.legs.cost(self.nodes, details=True)
         feas = torch.isfinite(F).all(-1)
-        s = (self.pref * (F / F_SCALE.to(F.dtype))).sum(-1).clamp(max=S_MAX)
-        rew = torch.where(feas, -s, -(INFEASIBLE + viol)) - phi0               # Phi(terminal) = 0
+        s = self.scalarise(F.nan_to_num(posinf=1e6)).clamp(max=S_MAX)
+        rew = torch.where(feas, -s, -(INFEASIBLE + viol.clamp(max=3.0))) - phi0   # Phi(terminal) = 0
         return rew.float(), True, {"F": F, "feasible": feas}
