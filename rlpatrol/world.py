@@ -19,6 +19,8 @@ class World:
     cyl_m: np.ndarray         # [M, 3] cylinders [x y R] metres
     cyl_margin: float         # free-space margin outside the cylinders (m), as free_space.m
     z_patrol: float
+    rects: np.ndarray = None  # [K, 5] obstacle boxes [xmin xmax ymin ymax top] metres (uninflated)
+    direct_rays: bool = False # True: ray-cast the cylinders directly (modified worlds; no ray table)
 
     def to_units(self, p):
         """world metres [..., 3] -> NMOPSO units (CreateModel.m toU)."""
@@ -51,4 +53,16 @@ def load_world(name="factory2_model.json", device="cpu", dtype=torch.float64) ->
                  bounds=np.array(J["bounds_units"], float),
                  threats=torch.tensor(J["threats_units"], dtype=dtype, device=device),
                  cyl_m=np.array(J["cylinders_m"], float), cyl_margin=float(J["cylMargin"]),
-                 z_patrol=float(J["zPatrol"]))
+                 z_patrol=float(J["zPatrol"]), rects=np.array(J["rects"], float))
+
+
+def with_extra(world, cyl_m):
+    """the world plus extra cylinders [x y R] metres (e.g. an unexpected obstacle), as NMOPSO's
+    CreateModel.m adds extra_threats; rays are cast directly."""
+    cyl_m = np.atleast_2d(np.asarray(cyl_m, float))
+    s = world.scale
+    t = np.c_[(cyl_m[:, 0] - world.hall[0]) * s + 1, (cyl_m[:, 1] - world.hall[2]) * s + 1,
+              np.zeros(len(cyl_m)), cyl_m[:, 2] * s]
+    th = torch.cat([world.threats, torch.as_tensor(t, dtype=world.threats.dtype)])
+    return World(hall=world.hall, scale=s, bounds=world.bounds, threats=th, cyl_m=np.vstack([world.cyl_m, cyl_m]),
+                 cyl_margin=world.cyl_margin, z_patrol=world.z_patrol, rects=world.rects, direct_rays=True)

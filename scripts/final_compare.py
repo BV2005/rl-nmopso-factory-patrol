@@ -11,7 +11,9 @@ Methods (fronts are the feasible non-dominated set):
   hybrid           rl  U  warm50  (external archive of the warm-started run)       <- proposed
   rl+cold50        rl  U  cold50  (ablation: proposals without the warm start)
 Time per leg: NMOPSO wall time of the run (one core), plus the RL proposal time for rl-based methods.
-  python scripts/final_compare.py"""
+  python scripts/final_compare.py [--warm data/warm_v2_seed2_real.mat --warmdir nmopso_warm50_seed2 --tag seed2]
+Without the warm-started runs (--warmdir missing or incomplete) the warm50 / hybrid rows are left out."""
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -38,12 +40,19 @@ def run(k, s, name):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--warm", default="warm_v2_real.mat")
+    ap.add_argument("--warmdir", default="nmopso_warm50")
+    ap.add_argument("--tag", default="")
+    a = ap.parse_args()
+    DIRS["warm50"] = a.warmdir
     torch.set_num_threads(2)
     w = load_world()
     legs = loadmat(DATA / "legs_real.mat")["legs"]
-    W = loadmat(DATA / "warm_v2_real.mat")
+    W = loadmat(DATA / Path(a.warm).name)
     t_rl = float(W["wall_s"].squeeze()) / len(legs)
-    methods = ["straight", "rl", "nm500", "nm500+straight", "cold50", "cold50+straight", "warm50", "hybrid", "rl+cold50"]
+    have_warm = all((ROOT / "results" / a.warmdir / f"leg{k + 1:03d}_seed{s}.mat").exists() for k in range(len(legs)) for s in SEEDS)
+    methods = ["straight", "rl", "nm500", "nm500+straight", "cold50", "cold50+straight"] + (["warm50", "hybrid"] if have_warm else []) + ["rl+cold50"]
     HV = {m: np.zeros((len(legs), len(SEEDS))) for m in methods}
     IGD = {m: np.zeros((len(legs), len(SEEDS))) for m in methods}
     T = {m: np.zeros((len(legs), len(SEEDS))) for m in methods}
@@ -53,13 +62,14 @@ def main():
         Fr = lg.cost(lg.decode(*(torch.tensor(W[n][k, :m]) for n in ("r", "psi", "phi")))).numpy()
         st = Fr[:1]
         for j, s in enumerate(SEEDS):
-            (fn, tn), (fc, tc), (fw, tw) = run(k, s, "nm500"), run(k, s, "cold50"), run(k, s, "warm50")
+            (fn, tn), (fc, tc) = run(k, s, "nm500"), run(k, s, "cold50")
+            fw, tw = run(k, s, "warm50") if have_warm else (np.zeros((0, 4)), 0.0)
             fronts = {"straight": st, "rl": Fr, "nm500": fn, "nm500+straight": np.vstack([fn, st]),
                       "cold50": fc, "cold50+straight": np.vstack([fc, st]), "warm50": fw,
                       "hybrid": np.vstack([Fr, fw]), "rl+cold50": np.vstack([Fr, fc])}
             times = {"straight": 0.0, "rl": t_rl, "nm500": tn, "nm500+straight": tn, "cold50": tc,
                      "cold50+straight": tc, "warm50": tw + t_rl, "hybrid": tw + t_rl, "rl+cold50": tc + t_rl}
-            fronts = {n: feasible_front(f) for n, f in fronts.items()}
+            fronts = {n: feasible_front(f) for n, f in fronts.items() if n in methods}
             ref = feasible_front(np.vstack([f for f in fronts.values() if len(f)])) / SCALE
             for n, f in fronts.items():
                 HV[n][k, j] = hv(f)
@@ -80,7 +90,7 @@ def main():
                                  "hv_rel_pct": float(100 * (hm.mean() / hb.mean() - 1)),
                                  "wilcoxon_p": float(wilcoxon(hm[nz], hb[nz]).pvalue) if nz.sum() >= 6 else None}
         out["methods"][n] = row
-    (ROOT / "results" / "final_compare.json").write_text(json.dumps(out, indent=1))
+    (ROOT / "results" / f"final_compare{'_' + a.tag if a.tag else ''}.json").write_text(json.dumps(out, indent=1))
     print(f"{'method':16s} {'HV':>7s} {'IGD+':>7s} {'time/leg':>9s}   vs nm500+straight (W/T/L, rel, p)     vs cold50+straight")
     for n, r in out["methods"].items():
         a = r.get("vs_nm500+straight"); b = r.get("vs_cold50+straight")
