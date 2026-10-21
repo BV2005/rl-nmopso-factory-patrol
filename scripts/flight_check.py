@@ -14,10 +14,17 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from rlpatrol.world import load_world  # noqa: E402
-
 DRONE_R = 0.3
+
+
+def obstacle_boxes():
+    """[K, 5] boxes [xmin xmax ymin ymax top] metres: the obstacles, the low ones the patrol flies over,
+    and the four walls (data/factory2_model.json; numpy only, so it runs with the simulator's python)."""
+    J = json.loads((ROOT / "data" / "factory2_model.json").read_text())
+    h = J["hall"]
+    walls = np.array([[h[0] - 0.3, h[0], h[2], h[3], 12], [h[1], h[1] + 0.3, h[2], h[3], 12],
+                      [h[0], h[1], h[2] - 0.3, h[2], 12], [h[0], h[1], h[3], h[3] + 0.3, 12]])
+    return np.vstack([np.atleast_2d(np.array(J["rects"], float)), np.atleast_2d(np.array(J["overflown"], float)), walls])
 
 
 def load_states(run):
@@ -46,12 +53,7 @@ def main():
     ap.add_argument("run")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    w = load_world()
-    J = json.loads((ROOT / "data" / "factory2_model.json").read_text())
-    h = w.hall
-    walls = np.array([[h[0] - 0.3, h[0], h[2], h[3], 12], [h[1], h[1] + 0.3, h[2], h[3], 12],
-                      [h[0], h[1], h[2] - 0.3, h[2], 12], [h[0], h[1], h[3], h[3] + 0.3, 12]])
-    boxes = np.vstack([w.rects, np.atleast_2d(np.array(J["overflown"], float)), walls])   # obstacles, low ones, walls
+    boxes = obstacle_boxes()
     S, phases = load_states(a.run)
     rep = {"run": str(a.run), "drones": {}, "pairs": {}}
     for d, X in S.items():

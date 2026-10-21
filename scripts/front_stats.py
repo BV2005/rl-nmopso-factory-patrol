@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from scipy.io import loadmat
 
-d = Path(sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\bhara\Downloads\NMOPSO_repro\factory_patrol\out_factory2_auto\legs")
+d = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "data" / "factory2_auto_legs")
 fr, ch, tm = [], [], []
 for f in d.glob("*.mat"):
     r = loadmat(f, squeeze_me=True, struct_as_record=False)["r"]

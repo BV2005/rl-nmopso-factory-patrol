@@ -4,7 +4,8 @@ factory2_auto_full; every transit leg planned around the other drones' pads (kee
   rl     loop: v2 policy proposals (data/warm_v2_real.mat); transits: v2 policy in the world with the
          keep-out cylinders (straight path + K x (1 + S) rollouts, short-safe pick)
   nm500  loop: authors' NMOPSO-500 seed 1 (results/nmopso_real); transits: the same NMOPSO (variant runner
-         at MaxIt 500 = authors' code) with the keep-out cylinders (results/padsafe_nm500)
+         at MaxIt 500 = authors' code) with the keep-out cylinders (results/padsafe_nm500), from
+         matlab -batch "cd matlab; run_nmopso_variant('../data/legs_padsafe.mat','../results/padsafe_nm500',1,4,500,'',1500)"
   python scripts/export_padsafe_plan.py rl|nm500  -> results/plans/<name>_padsafe/patrol_paths.json, top.png"""
 import json
 import sys
