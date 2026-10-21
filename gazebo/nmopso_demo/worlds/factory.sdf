@@ -1,0 +1,688 @@
+<?xml version="1.0" ?>
+
+<sdf version="1.9">
+
+  <world name="factory">
+
+    <!-- ========================= -->
+    <!-- PHYSICS                   -->
+    <!-- ========================= -->
+
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <gravity>0 0 -9.8</gravity>
+
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397971057728974</latitude_deg>
+      <longitude_deg>8.546163739800146</longitude_deg>
+      <elevation>488.0</elevation>
+      <heading_deg>0</heading_deg>
+    </spherical_coordinates>
+
+    <atmosphere type="adiabatic"/>
+
+    <!-- ========================= -->
+    <!-- PLUGINS                   -->
+    <!-- ========================= -->
+
+    <plugin
+      filename="gz-sim-physics-system"
+      name="gz::sim::systems::Physics"/>
+
+    <plugin
+      filename="gz-sim-user-commands-system"
+      name="gz::sim::systems::UserCommands"/>
+
+    <plugin
+      filename="gz-sim-scene-broadcaster-system"
+      name="gz::sim::systems::SceneBroadcaster"/>
+
+    <plugin
+      filename="gz-sim-sensors-system"
+      name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <plugin
+      filename="gz-sim-navsat-system"
+      name="gz::sim::systems::NavSat"/>
+
+    <plugin
+      filename="gz-sim-air-pressure-system"
+      name="gz::sim::systems::AirPressure"/>
+
+    <plugin
+      filename="gz-sim-magnetometer-system"
+      name="gz::sim::systems::Magnetometer"/>
+
+    <plugin
+      filename="gz-sim-imu-system"
+      name="gz::sim::systems::Imu"/>
+
+    <!-- ========================= -->
+    <!-- LIGHTS                    -->
+    <!-- ========================= -->
+
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 20 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.3 0.2 -1</direction>
+    </light>
+
+    <light name="interior_light" type="point">
+      <cast_shadows>false</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>50</range>
+        <constant>0.5</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+    </light>
+
+    <!-- ========================= -->
+    <!-- GUI CAMERA                -->
+    <!-- ========================= -->
+
+    <gui fullscreen="0">
+      <camera name="user_camera">
+        <pose>0 -8 6 0 0.4 1.57</pose>
+        <view_controller>fps</view_controller>
+        <projection_type>perspective</projection_type>
+      </camera>
+    </gui>
+
+    <!-- ========================= -->
+    <!-- FLOOR                     -->
+    <!-- ========================= -->
+
+    <model name="floor">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>30 20 0.1</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>30 20 0.1</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.35 0.35 0.35 1</ambient>
+            <diffuse>0.35 0.35 0.35 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>0 0 -0.05 0 0 0</pose>
+    </model>
+
+    <!-- ========================= -->
+    <!-- INVISIBLE CEILING BARRIER -->
+    <!-- ========================= -->
+
+    <model name="ceiling_barrier">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>30 20 0.1</size>
+            </box>
+          </geometry>
+        </collision>
+      </link>
+      <pose>0 0 12 0 0 0</pose>
+    </model>
+
+    <!-- ========================= -->
+    <!-- WALLS                     -->
+    <!-- ========================= -->
+
+    <!-- North Wall (y=10) -->
+    <model name="north_wall">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>30 0.3 12</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>30 0.3 12</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.65 0.65 0.65 1</ambient>
+            <diffuse>0.65 0.65 0.65 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>0 10 6 0 0 0</pose>
+    </model>
+
+    <!-- South Wall (y=-10) -->
+    <model name="south_wall">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>30 0.3 12</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>30 0.3 12</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.65 0.65 0.65 1</ambient>
+            <diffuse>0.65 0.65 0.65 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>0 -10 6 0 0 0</pose>
+    </model>
+
+    <!-- East Wall (x=15) -->
+    <model name="east_wall">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.3 20 12</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.3 20 12</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.65 0.65 0.65 1</ambient>
+            <diffuse>0.65 0.65 0.65 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>15 0 6 0 0 0</pose>
+    </model>
+
+    <!-- West Wall (x=-15) -->
+    <model name="west_wall">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.3 20 12</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.3 20 12</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.65 0.65 0.65 1</ambient>
+            <diffuse>0.65 0.65 0.65 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>-15 0 6 0 0 0</pose>
+    </model>
+
+    <!-- ========================= -->
+    <!-- CENTRAL PARTITION         -->
+    <!-- ========================= -->
+
+    <!-- Partial wall dividing storage and assembly: x=0, y from -4 to 6 (length 10, center y=1), height 3.5 (z=1.75) -->
+    <model name="central_partition">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.3 10 3.5</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.3 10 3.5</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.65 0.65 0.65 1</ambient>
+            <diffuse>0.65 0.65 0.65 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>0 1 1.75 0 0 0</pose>
+    </model>
+
+    <!-- ========================= -->
+    <!-- STORAGE AREA (WEST)       -->
+    <!-- ========================= -->
+
+    <!-- Storage Rack Row 1 (x=-12, y from -6 to 2, length 8, center y=-2, height 3.5, z=1.75) -->
+    <model name="rack_row_1">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.4 8 3.5</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.4 8 3.5</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.35 0.22 0.1 1</ambient>
+            <diffuse>0.35 0.22 0.1 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>-12 -2 1.75 0 0 0</pose>
+    </model>
+
+    <!-- Storage Rack Row 2 (x=-9.5, y from -6 to 2, length 8, center y=-2, height 3.5, z=1.75) -->
+    <model name="rack_row_2">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.4 8 3.5</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.4 8 3.5</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.35 0.22 0.1 1</ambient>
+            <diffuse>0.35 0.22 0.1 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>-9.5 -2 1.75 0 0 0</pose>
+    </model>
+
+    <!-- Storage Rack Row 3 (x=-7, y from -6 to 2, length 8, center y=-2, height 3.5, z=1.75) -->
+    <model name="rack_row_3">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.4 8 3.5</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.4 8 3.5</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.35 0.22 0.1 1</ambient>
+            <diffuse>0.35 0.22 0.1 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>-7 -2 1.75 0 0 0</pose>
+    </model>
+
+    <!-- Storage Rack Row 4 (x=-4.5, y from -6 to 2, length 8, center y=-2, height 3.5, z=1.75) -->
+    <model name="rack_row_4">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.4 8 3.5</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.4 8 3.5</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.35 0.22 0.1 1</ambient>
+            <diffuse>0.35 0.22 0.1 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>-4.5 -2 1.75 0 0 0</pose>
+    </model>
+
+    <!-- Loading Dock Area (NW corner: x=-12, y=7, size 4x3x1, z=0.5) -->
+    <model name="loading_dock">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>4 3 1</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>4 3 1</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.5 0.5 0.5 1</ambient>
+            <diffuse>0.5 0.5 0.5 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>-12 7 0.5 0 0 0</pose>
+    </model>
+
+    <!-- ========================= -->
+    <!-- ASSEMBLY / MACHINE AREA   -->
+    <!-- ========================= -->
+
+    <!-- CNC Machine (x=5, y=5, size 3x2.5x2.5, z=1.25) -->
+    <model name="cnc_machine">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>3 2.5 2.5</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>3 2.5 2.5</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.15 0.3 0.7 1</ambient>
+            <diffuse>0.15 0.3 0.7 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>5 5 1.25 0 0 0</pose>
+    </model>
+
+    <!-- Lathe Machine (x=10, y=5, size 2.5x2x2, z=1.0) -->
+    <model name="lathe_machine">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>2.5 2 2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>2.5 2 2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.2 0.5 1</ambient>
+            <diffuse>0.1 0.2 0.5 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>10 5 1.0 0 0 0</pose>
+    </model>
+
+    <!-- Assembly Workbench (x=7, y=0, size 4x1.5x1.2, z=0.6) -->
+    <model name="assembly_workbench">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>4 1.5 1.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>4 1.5 1.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.6 0.45 0.25 1</ambient>
+            <diffuse>0.6 0.45 0.25 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>7 0 0.6 0 0 0</pose>
+    </model>
+
+    <!-- Conveyor Belt (x=8, y=-4, size 8x1x0.8, z=0.4) -->
+    <model name="conveyor_belt">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>8 1 0.8</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>8 1 0.8</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.3 0.3 0.3 1</ambient>
+            <diffuse>0.3 0.3 0.3 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>8 -4 0.4 0 0 0</pose>
+    </model>
+
+    <!-- Packing Station (x=4, y=-7, size 3x2x1.5, z=0.75) -->
+    <model name="packing_station">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>3 2 1.5</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>3 2 1.5</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.2 0.5 0.2 1</ambient>
+            <diffuse>0.2 0.5 0.2 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>4 -7 0.75 0 0 0</pose>
+    </model>
+
+    <!-- Shipping Crate Stack (x=10, y=-7, size 2x2x2, z=1.0) -->
+    <model name="shipping_crate_stack">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>2 2 2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>2 2 2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.6 0.5 0.2 1</ambient>
+            <diffuse>0.6 0.5 0.2 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>10 -7 1.0 0 0 0</pose>
+    </model>
+
+    <!-- ========================= -->
+    <!-- FLOOR MARKINGS            -->
+    <!-- ========================= -->
+
+    <!-- Safety line along central aisle: x=0, y=0, z=0.01, size 0.1x20x0.02, yellow -->
+    <model name="safety_line">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.1 20 0.02</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.1 20 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.9 0.8 0.1 1</ambient>
+            <diffuse>0.9 0.8 0.1 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>0 0 0.01 0 0 0</pose>
+    </model>
+
+    <!-- Storage zone marker: x=-9, y=-8.5, z=0.01, size 12x0.1x0.02, blue -->
+    <model name="storage_zone_marker">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>12 0.1 0.02</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>12 0.1 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.2 0.3 0.8 1</ambient>
+            <diffuse>0.2 0.3 0.8 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>-9 -8.5 0.01 0 0 0</pose>
+    </model>
+
+    <!-- Assembly zone marker: x=8, y=-8.5, z=0.01, size 10x0.1x0.02, green -->
+    <model name="assembly_zone_marker">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>10 0.1 0.02</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>10 0.1 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.2 0.7 0.2 1</ambient>
+            <diffuse>0.2 0.7 0.2 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+      <pose>8 -8.5 0.01 0 0 0</pose>
+    </model>
+
+  </world>
+</sdf>

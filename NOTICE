@@ -1,0 +1,21 @@
+rl-nmopso-factory-patrol
+Copyright 2026 Bharath Vaaishnav
+
+Licensed under the Apache License, Version 2.0 (LICENSE), except for the third-party code below.
+
+third_party/NMOPSO/
+  The authors' NMOPSO implementation (https://github.com/ngandng/NMOPSO), included unmodified.
+  Copyright Thi Thuy Ngan Duong; parts based on Yarpiz MOPSO and SPSO (https://github.com/duongpm/SPSO).
+  Redistributed under its own BSD-style license: third_party/NMOPSO/license.txt.
+  Paper: T.T.N. Duong, D.N. Bui, M.D. Phung, "Navigation variable-based multi-objective particle swarm
+  optimization for UAV path planning with kinematic constraints", Neural Computing and Applications
+  (2025), https://doi.org/10.1007/s00521-024-10945-1
+
+matlab/nmopso_variant/NMOPSO.m
+  A copy of third_party/NMOPSO/NMOPSO.m with two marked additions ("[variant]": MaxIt from an
+  environment variable; optional warm-start particles), under the same BSD-style license. Used only
+  for the reduced-iteration and warm-started runs; every "NMOPSO-500" result uses the unmodified file.
+
+gazebo/nmopso_demo/
+  The ROS 2 / Gazebo / PX4 SITL patrol demo from the patrol_drone project
+  (https://github.com/BV2005/patrol_drone, Apache-2.0).

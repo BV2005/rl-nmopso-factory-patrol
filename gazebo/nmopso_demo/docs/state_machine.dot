@@ -1,0 +1,62 @@
+// Execution states of patrol_follower.py (branch nmopso-demo-factory2-auto).
+// Render: dot -Tpng -Gdpi=150 state_machine.dot -o state_machine.png
+digraph states {
+  graph [label=<UAV execution states — patrol_follower.py phases (<b>bold</b>) and track sub-steps, nmopso-demo-factory2-auto>,
+         labelloc=t, fontname="DejaVu Sans", fontsize=18, rankdir=TB, nodesep=0.45, ranksep=0.42, pad=0.3, compound=true];
+  node  [fontname="DejaVu Sans", fontsize=10.5, shape=box, style="rounded", color="#555555", penwidth=1.2];
+  edge  [fontname="DejaVu Sans", fontsize=9, color="#555555", arrowsize=0.7];
+
+  wait    [label=<<b>WAIT_POSITION</b> — on the pad, PX4 SITL up<br/>setpoint: hover over the pad; waits for a valid position>];
+  arm     [label=<<b>ARM</b> — MAVLink every 1 s:<br/>set mode OFFBOARD, then arm>];
+  takeoff [label=<<b>TAKEOFF</b> — climb straight up over the own pad to<br/>1.8 m (pad in own zone) or 3.1 m (transit layer),<br/>then hover depart_delay (6 s for the middle pad)>];
+
+  subgraph cluster_in {
+    label=<<b>TRANSIT_IN</b> — carrot 1 m/s along the planned transit (max lead 1.5 m)>; fontname="DejaVu Sans"; fontsize=11;
+    color="#2a78d6"; penwidth=2; style=rounded;
+    subgraph cluster_in_layer {
+      label="transit layer — pad outside the own zone (drones 1, 2)"; fontsize=9; style=dashed; color="#777777"; penwidth=1;
+      in1 [label="corridor north over the own pad\n3.1 m"];
+      in2 [label="NMOPSO transit legs\n2.9–3.3 m, across other zones"];
+      in3 [label="above the zone entry point\nhold while the column is blocked"];
+      in4 [label="descend vertically\nto the patrol band (1.8 m)"];
+      in1 -> in2; in2 -> in3; in3 -> in4 [label=" column clear\n (≤ 30 s)"];
+    }
+    subgraph cluster_in_own {
+      label="pad in the own zone (drone 3)"; fontsize=9; style=dashed; color="#777777"; penwidth=1;
+      own1 [label="corridor north over the own pad\n1.8 m"];
+      own2 [label="NMOPSO legs inside the own zone\n1.6–2.0 m, zone walls"];
+      own1 -> own2;
+    }
+  }
+
+  patrol [color="#1baf7a", penwidth=2, label=<<b>PATROL</b> — carrot 1 m/s along the NMOPSO loop of the own zone<br/>(auto lanes + Voronoi zone, 1.6–2.0 m); lap_done at the loop end>];
+
+  subgraph cluster_out {
+    label=<<b>TRANSIT_OUT</b> — the transit in reverse>; fontname="DejaVu Sans"; fontsize=11;
+    color="#2a78d6"; penwidth=2; style=rounded;
+    out1 [label="transit layer: hold while the column is blocked, climb to 3.1 m,\nNMOPSO transit legs back, corridor over the own pad\n(own-zone pad: NMOPSO legs back at 1.8 m)"];
+  }
+
+  land [label=<<b>LAND</b> — hover over the own pad; hold while a drone is below in the column<br/>MAVLink NAV_LAND every 2 s; 3 s on the ground → disarm>];
+  done [label=<<b>DONE</b> — log flushed, node exits>];
+
+  wait -> arm [label=" position valid + 2 s"];
+  arm -> takeoff [label=" armed and OFFBOARD"];
+  takeoff -> in1 [lhead=cluster_in, label=" |z − target| < 0.15 m and\n 3 s + depart_delay"];
+  takeoff -> own1 [style=invis];
+  in4 -> patrol [ltail=cluster_in, label=" end of the track (< 0.3 m)"];
+  own2 -> patrol [style=invis];
+  patrol -> patrol [label=" lap < LAPS\n (LAPS = 0: endless)"];
+  patrol -> out1 [lhead=cluster_out, label=" lap = LAPS"];
+  out1 -> land [ltail=cluster_out, label=" end of the track (< 0.3 m)"];
+  land -> done [label=" disarmed (or 10 s on the ground)"];
+  takeoff -> patrol [style=dashed, constraint=false, label="no transit_in"];
+  patrol -> land [style=dashed, constraint=false, label="no transit_out"];
+
+  subgraph notes {
+    rank=sink;
+    note1 [style="rounded,dashed", label=<<b>Vertical-clearance rule</b> — before any climb, descent or landing:<br/>hold while another airborne drone is within 2 m horizontally<br/>in the column the move passes through (max 30 s)>];
+    note2 [style="rounded,dashed", label=<<b>Events</b> — /droneN/patrol/event (JSON):<br/>phase · lap_done · hold_start / hold_end · land_command<br/>→ patrol_recorder.py → events.csv>];
+  }
+  done -> note1 [style=invis]; done -> note2 [style=invis];
+}

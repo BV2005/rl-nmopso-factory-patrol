@@ -1,0 +1,44 @@
+// Data pipeline of the NMOPSO factory2 Voronoi patrol demo (branch nmopso-demo-factory2-voronoi).
+// Render: dot -Tpng -Gdpi=150 data_pipeline.dot -o data_pipeline.png
+digraph pipeline {
+  graph [label="Patrol data pipeline — identical for every drone and every run", labelloc=t,
+         fontname="DejaVu Sans", fontsize=20, rankdir=TB, nodesep=0.45, ranksep=0.5, pad=0.3];
+  node  [fontname="DejaVu Sans", fontsize=11, shape=box, style="rounded", color="#555555", penwidth=1.2];
+  edge  [fontname="DejaVu Sans", fontsize=9, color="#555555", arrowsize=0.7];
+
+  px4     [label="PX4 uXRCE-DDS topics, per drone (namespace droneN)\nvehicle_local_position_v1 · vehicle_attitude · battery_status_v1 (1 Hz)\nvehicle_status_v4 · vehicle_land_detected"];
+  frame   [label="Frame conversion\nlocal NED (origin = the drone's pad) → factory ENU\nx = x_pad + E, y = y_pad + N, z = −D"];
+  follow  [label="patrol_follower.py ×3 (20 Hz)\nflies the plan · publishes /droneN/patrol/event\nphase · lap_done · hold_start / hold_end · land_command"];
+  rec     [color="#1baf7a", penwidth=2, label="patrol_recorder.py  (10 Hz)"];
+  trace   [shape=note, style="", label="trace_droneN.csv (20 Hz)\nposition · carrot setpoint · phase · lap · s"];
+  states  [shape=note, style="", label="drone_states.csv  (10 Hz, all drones)\nposition · velocity · speed · roll / pitch / yaw\nbattery % · voltage · current · mAh · warning\narming / nav state · failsafe · landed · phase · data age"];
+  events  [shape=note, style="", label="events.csv\nfollower events + PX4 state changes\n(arming, nav state, failsafe, landed, battery warning)"];
+  plan    [shape=note, style="", label="patrol_paths.json\nplanned polylines · obstacles · pads"];
+  check   [label="check_patrol.py\ntracking error to the plan · clearance per phase\nseparation · coverage"];
+  metrics [label="metrics_summary.py\nvalidity filters: position age > 0.5 s, jumps > 15 m/s, outside the hall\nflight time · distance · speed · time per phase · laps · holds\nbattery (energy only if current is measured) · tilt · clearance\nseparation at 10 Hz: horizontal · 3D · same level (|dz| < 0.6 m)"];
+  msum    [shape=note, style="", color="#1baf7a", label="metrics_summary.csv\none row per drone + 'all'"];
+  summary [shape=note, style="", label="summary.txt"];
+  figs    [shape=note, style="", label="Figures / tables\n(README result tables, plots)"];
+
+  px4 -> frame;
+  frame -> follow;
+  frame -> rec;
+  follow -> rec [label="events (JSON)"];
+  follow -> trace;
+  rec -> states;
+  rec -> events;
+  trace -> check;
+  plan -> check;
+  plan -> metrics;
+  states -> metrics;
+  events -> metrics;
+  metrics -> msum;
+  check -> summary;
+  metrics -> summary [style=dashed, label="printed table"];
+  msum -> figs;
+  summary -> figs [style=dashed];
+
+  {rank=same; follow; rec;}
+  {rank=same; trace; states; events; plan;}
+  {rank=same; check; metrics;}
+}

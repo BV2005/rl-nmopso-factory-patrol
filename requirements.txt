@@ -1,0 +1,6 @@
+# Python 3.10+ (tested with 3.13). CPU PyTorch is enough; for a CUDA build see https://pytorch.org.
+#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1
+numpy==2.5.4
+scipy==1.18.1
+matplotlib==3.11.2

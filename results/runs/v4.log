@@ -1,0 +1,12 @@
+config Config(iters=400, batch=2048, epochs=5, minibatch=8192, lr=0.0003, lr_v=0.001, gamma=1.0, lam=1.0, clip=0.2, target_kl=0.02, ent=0.0, hidden=256, log_std0=-1.2, real_frac=0.7, lmin=0.6, lmax=6.5, lmax_long=15.0, shape=0.0, scalar='linear', act_pen=0.02, budget=True, u_lo=0.15, u_hi=1.2, budget_pen=50.0, seed=1, threads=4)
+it    0  return -4.042  feas  66.3 %  det feas  72.4 %  det F [0.0005, 0.0032, 0.0058, 0.0039]  F2/straight at u=0.3,1.0 [0.973, 0.978]  kl 0.003 ep 5  std [0.3, 0.301, 0.3]  6.4 s
+it   10  return -3.255  feas  74.3 %  det feas  79.2 %  det F [0.0318, 0.0029, 0.0295, 0.0322]  F2/straight at u=0.3,1.0 [0.752, 0.752]  kl 0.004 ep 5  std [0.296, 0.289, 0.297]  6.1 s
+it   20  return -2.818  feas  79.6 %  det feas  81.2 %  det F [0.0631, 0.0028, 0.0377, 0.0489]  F2/straight at u=0.3,1.0 [0.666, 0.67]  kl 0.005 ep 5  std [0.288, 0.277, 0.289]  6.2 s
+it   30  return -2.545  feas  81.1 %  det feas  83.2 %  det F [0.0962, 0.0027, 0.021, 0.063]  F2/straight at u=0.3,1.0 [0.608, 0.608]  kl 0.006 ep 5  std [0.282, 0.267, 0.284]  6.2 s
+it   40  return -2.461  feas  82.8 %  det feas  84.5 %  det F [0.112, 0.0028, 0.0487, 0.071]  F2/straight at u=0.3,1.0 [0.573, 0.581]  kl 0.008 ep 5  std [0.277, 0.258, 0.28]  6.6 s
+it   50  return -2.409  feas  84.0 %  det feas  85.1 %  det F [0.1259, 0.0028, 0.0439, 0.072]  F2/straight at u=0.3,1.0 [0.55, 0.545]  kl 0.007 ep 5  std [0.272, 0.252, 0.274]  6.4 s
+it   60  return -2.456  feas  82.5 %  det feas  84.9 %  det F [0.1302, 0.0027, 0.0417, 0.0741]  F2/straight at u=0.3,1.0 [0.545, 0.552]  kl 0.006 ep 5  std [0.267, 0.243, 0.268]  6.3 s
+it   70  return -2.358  feas  83.3 %  det feas  84.9 %  det F [0.1389, 0.0027, 0.0565, 0.0774]  F2/straight at u=0.3,1.0 [0.533, 0.531]  kl 0.008 ep 5  std [0.263, 0.236, 0.264]  6.0 s
+it   80  return -2.422  feas  82.2 %  det feas  85.0 %  det F [0.1464, 0.0027, 0.0467, 0.0815]  F2/straight at u=0.3,1.0 [0.519, 0.52]  kl 0.007 ep 5  std [0.257, 0.23, 0.258]  6.0 s
+it   90  return -2.360  feas  83.3 %  det feas  85.0 %  det F [0.1364, 0.0028, 0.0403, 0.0794]  F2/straight at u=0.3,1.0 [0.534, 0.535]  kl 0.005 ep 5  std [0.25, 0.222, 0.254]  6.1 s
+it  100  return -2.483  feas  81.4 %  det feas  85.1 %  det F [0.1308, 0.0028, 0.0387, 0.0739]  F2/straight at u=0.3,1.0 [0.52, 0.527]  kl 0.006 ep 5  std [0.245, 0.216, 0.251]  7.3 s

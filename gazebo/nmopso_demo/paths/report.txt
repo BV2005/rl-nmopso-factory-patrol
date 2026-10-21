@@ -1,0 +1,6 @@
+
+== Patrol check
+drone 1: 309 waypoints, loop length 144.1 m (+ 13.7 m transit), zone coverage 95.8 %, min clearance to obstacles 0.74 m, altitude 1.60-3.11 m
+drone 2: 199 waypoints, loop length 73.7 m (+ 19.4 m transit), zone coverage 84.1 %, min clearance to obstacles 0.80 m, altitude 1.60-3.11 m
+drone 3: 298 waypoints, loop length 106.6 m (+ 8.1 m transit), zone coverage 81.7 %, min clearance to obstacles 0.80 m, altitude 1.60-2.00 m
+whole factory: 88.1 % of the free floor within 2 m of a patrol loop

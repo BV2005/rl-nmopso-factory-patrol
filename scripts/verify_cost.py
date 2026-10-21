@@ -1,6 +1,9 @@
 """Checks the PyTorch port (rlpatrol/nmopso_cost.py) against the authors' MATLAB SphericalToCart2.m
-and MyCost.m on random solutions drawn as CreateRandomSolution.m does, on real and random legs."""
+and MyCost.m on random solutions drawn as CreateRandomSolution.m does, on real and random legs.
+  python scripts/verify_cost.py            runs MATLAB (MATLAB_EXE, default: matlab on the PATH)
+  python scripts/verify_cost.py --offline  compares with the MATLAB results saved in results/verify/out.mat"""
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -14,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 from rlpatrol.nmopso_cost import ANGLE, N_NODES, Legs  # noqa: E402
 from rlpatrol.world import DATA, load_world  # noqa: E402
 
-MATLAB = r"C:\Program Files\MATLAB\R2026a\bin\matlab.exe"
+MATLAB = os.environ.get("MATLAB_EXE", "matlab")
 
 
 def main(per_leg=200, seed=0):
@@ -33,7 +36,8 @@ def main(per_leg=200, seed=0):
     tmp = ROOT / "results" / "verify"; tmp.mkdir(parents=True, exist_ok=True)
     savemat(tmp / "in.mat", {"legs": legs_m, "leg": (idx + 1).numpy()[:, None].astype(float),
                              "r": r.numpy(), "psi": psi.numpy(), "phi": phi.numpy()})
-    subprocess.run([MATLAB, "-batch", f"cd('{ROOT / 'matlab'}'); eval_mycost('{tmp / 'in.mat'}', '{tmp / 'out.mat'}')"], check=True)
+    if "--offline" not in sys.argv:
+        subprocess.run([MATLAB, "-batch", f"cd('{ROOT / 'matlab'}'); eval_mycost('{tmp / 'in.mat'}', '{tmp / 'out.mat'}')"], check=True)
     M = loadmat(tmp / "out.mat")
     Fm, Xm = M["cost"], M["xyz"]
     fin_m, fin_p = np.isfinite(Fm).all(1), np.isfinite(F).all(1)

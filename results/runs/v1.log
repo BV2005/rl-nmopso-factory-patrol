@@ -1,0 +1,11 @@
+config Config(iters=300, batch=4096, epochs=10, minibatch=8192, lr=0.0003, lr_v=0.001, gamma=1.0, lam=1.0, clip=0.2, target_kl=0.02, ent=0.0, hidden=256, log_std0=-1.2, real_frac=0.7, lmin=0.6, lmax=6.5, lmax_long=15.0, shape=0.0, scalar='linear', seed=1, threads=4)
+it    0  return -2.900  feas  67.9 %  det feas  72.6 %  det F [0.0005, 0.0032, 0.0105, 0.0042]  corner F_j [0.0006, 0.0032, 0.0106, 0.0046]  kl 0.004 ep 10  std [0.298, 0.298, 0.303]  33.8 s
+it   10  return -2.178  feas  77.6 %  det feas  80.4 %  det F [0.0442, 0.003, 0.0307, 0.036]  corner F_j [0.0453, 0.0029, 0.0549, 0.0358]  kl 0.005 ep 10  std [0.284, 0.262, 0.289]  33.1 s
+it   20  return -1.900  feas  80.8 %  det feas  83.4 %  det F [0.0759, 0.003, 0.0334, 0.0495]  corner F_j [0.074, 0.003, 0.0295, 0.0492]  kl 0.006 ep 10  std [0.265, 0.232, 0.272]  39.2 s
+it   30  return -1.716  feas  82.7 %  det feas  85.9 %  det F [0.0844, 0.003, 0.0554, 0.0511]  corner F_j [0.0701, 0.003, 0.0742, 0.0503]  kl 0.006 ep 10  std [0.248, 0.208, 0.249]  36.4 s
+it   40  return -1.623  feas  83.4 %  det feas  86.4 %  det F [0.0863, 0.0031, 0.0586, 0.0503]  corner F_j [0.0684, 0.0029, 0.0372, 0.0512]  kl 0.007 ep 10  std [0.237, 0.189, 0.234]  35.6 s
+it   50  return -1.511  feas  84.5 %  det feas  87.0 %  det F [0.0817, 0.0031, 0.0758, 0.0495]  corner F_j [0.0691, 0.003, 0.051, 0.0512]  kl 0.007 ep 10  std [0.229, 0.173, 0.222]  33.2 s
+it   60  return -1.422  feas  85.5 %  det feas  87.3 %  det F [0.0817, 0.0031, 0.0662, 0.049]  corner F_j [0.0679, 0.0031, 0.0736, 0.0515]  kl 0.009 ep 10  std [0.221, 0.162, 0.207]  34.2 s
+it   70  return -1.292  feas  86.8 %  det feas  87.5 %  det F [0.0814, 0.0031, 0.0754, 0.0482]  corner F_j [0.0667, 0.003, 0.1286, 0.0527]  kl 0.008 ep 10  std [0.212, 0.152, 0.199]  34.8 s
+it   80  return -1.261  feas  87.1 %  det feas  88.1 %  det F [0.0736, 0.0033, 0.0592, 0.0445]  corner F_j [0.0556, 0.0032, 0.0854, 0.0495]  kl 0.008 ep 10  std [0.207, 0.142, 0.188]  32.9 s
+it   90  return -1.182  feas  88.0 %  det feas  87.9 %  det F [0.0698, 0.0033, 0.0696, 0.0428]  corner F_j [0.0509, 0.0033, 0.063, 0.0501]  kl 0.009 ep 10  std [0.198, 0.134, 0.176]  34.4 s

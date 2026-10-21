@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from rlpatrol.legs import random_legs  # noqa: E402
 from rlpatrol.world import DATA, load_world  # noqa: E402
 
-PREVIEW = Path(r"C:\Users\bhara\Downloads\NMOPSO_repro\factory_patrol\out_factory2_auto_full\preview_paths.json")
+PREVIEW = DATA / "factory2_auto_full_preview.json"   # planner/factory_patrol dry run, layout factory2_auto_full
 
 
 def real_legs():
