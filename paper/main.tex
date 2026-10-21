@@ -1,0 +1,80 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{amsmath,amssymb,graphicx,booktabs,hyperref}
+\title{Amortising Multi-Objective UAV Path Planning with Preference-Conditioned Reinforcement Learning:\\
+A Drop-in Replacement for NMOPSO in Indoor Factory Patrol}
+\author{\IEEEauthorblockN{Bharath Vaaishnav}}
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Multi-objective particle swarm optimisers such as NMOPSO produce high-quality Pareto fronts of UAV
+paths but need minutes per leg, which confines them to offline planning. We cast NMOPSO's own
+leg-planning problem---the same spherical path encoding, the same bounds and the same four objectives
+(path length, threat, altitude, smoothness)---as a short-horizon Markov decision process and train a
+single preference-conditioned policy with PPO. At inference the policy returns a Pareto front for an
+unseen leg in milliseconds. On the 73 legs of a three-drone patrol of a 30\,$\times$\,20\,m factory
+(Gazebo world \texttt{factory2}) and 200 held-out random legs, we compare against the authors'
+unmodified NMOPSO, scoring both methods with the authors' cost function. \emph{[Results to be filled
+in from the improvement loop.]}
+\end{abstract}
+
+\section{Introduction}
+Indoor patrol of factories by small multirotors requires collision-free, short and smooth paths
+between patrol points that are packed between racks and machines. NMOPSO~\cite{nmopso} formulates
+each leg as a four-objective problem and returns a Pareto front; in our three-drone factory patrol
+pipeline (balanced power-diagram zoning, free-space lane generation, 2-opt tours) it plans every leg,
+taking a median of about 300\,s per leg on one CPU core---about 50\,min for a 72-leg plan on six
+workers. This rules out replanning in flight.
+\emph{Contributions:} (i) an exact MDP formulation of NMOPSO's leg problem, so that a learned planner
+optimises precisely the same objectives in the same decision space; (ii) a preference-conditioned
+PPO planner that amortises the whole Pareto front; (iii) a fair benchmark against the unmodified
+NMOPSO on real patrol legs, with all costs scored by the authors' code.
+
+\section{Problem}
+A leg runs from $s$ to $g$ in the patrol band $z\in[1.6,2.0]$\,m. A path is $n=10$ nodes
+$P_1..P_n$ between $s$ and $g$, encoded as in NMOPSO by $(r_i,\psi_i,\varphi_i)$ with
+$r_i\in[r_{\max}/9, r_{\max}]$, $r_{\max}=3\|g-s\|/n$, $\psi_i,\varphi_i\in[-\pi/4,\pi/4]$, decoded by
+chained transforms from the start pose and clamped to the map. Obstacles are the factory's boxes,
+inflated by 0.4\,m and covered by 87 vertical cylinders. The objectives are NMOPSO's
+$F_1=|1-\|g-s\|/\ell|$ (path length $\ell$), $F_2$ (mean threat over segment--cylinder pairs, infinite
+on collision), $F_3$ (mean altitude deviation from the band centre), $F_4$ (mean turning angle$/\pi$).
+
+\section{Method}
+\subsection{MDP}
+Step $i$ selects $(r_i,\psi_i,\varphi_i)$; the state holds the chained pose. The observation is the
+goal in the local frame, the clamping offset, the altitude in the band, the steps left, the leg
+length, 16 range readings to inflated cylinders and map bounds (precomputed table), and the
+preference $w\in\Delta^3$. The terminal reward is $-w^\top(F\oslash\sigma)$ for feasible paths and
+$-(6+v)$ otherwise ($v$: soft violation); a potential-based term $\Phi=-0.5\|q-g\|/\|g-s\|$ with
+$\Phi=0$ at the end shapes intermediate steps without changing the optimal policy~\cite{ng1999}.
+\subsection{Training}
+PPO with GAE, preferences drawn from Dirichlet(1), legs drawn between random free points of the hall.
+\subsection{Pareto front at inference}
+For $K$ preferences (corners, edge midpoints, centroid, random), one deterministic and $S$ sampled
+paths each; the feasible non-dominated set is the front.
+
+\section{Experiments}
+\subsection{Fairness}
+Both methods use the identical model (exported from the planner's own \texttt{CreateModel.m}). Our
+batched PyTorch port of the cost is used only for training; it matches \texttt{MyCost.m} to
+$10^{-15}$ on 8000 random solutions with identical feasibility. All reported costs are re-scored by
+the authors' MATLAB code. NMOPSO is run unmodified (MaxIt 500, nPop 100, nRep 50), three seeds.
+\subsection{Metrics}
+Per leg, objectives are normalised by the ideal and nadir of the union of all fronts; hypervolume
+with reference 1.1. We also report the path the patrol pipeline would fly (\emph{short-safe}
+selection) and wall-clock time.
+\subsection{Results}
+\emph{[Tables and figures from the improvement loop.]}
+
+\section{Extension: multi-agent persistent patrol}
+\emph{[Planned.]}
+
+\section{Conclusion}
+
+\begin{thebibliography}{9}
+\bibitem{nmopso} Duong, Bui, Phung, ``NMOPSO'' [TODO: verify full author names, title and venue], 2025.
+Code: \url{https://github.com/ngandng/NMOPSO}.
+\bibitem{ng1999} A.~Y.~Ng, D.~Harada, S.~Russell, ``Policy invariance under reward transformations,'' ICML 1999.
+\bibitem{ppo} J.~Schulman et al., ``Proximal policy optimization algorithms,'' arXiv:1707.06347, 2017.
+\end{thebibliography}
+\end{document}
