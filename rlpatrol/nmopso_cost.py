@@ -66,7 +66,7 @@ class Legs:
     def cost(self, nodes, details=False):
         """MyCost.m: nodes [B, n, 3] -> F [B, 4] = [J1 path length, J2 threat, J3 altitude, J4 smoothness]
         (inf where infeasible). details=True also returns a soft constraint violation per path
-        (>= 0, 0 iff J1 and J2 are finite), for shaping only."""
+        (>= 0, 0 iff J1 and J2 are finite) and J2 without the collision infinity, for shaping only."""
         P = torch.cat([self.start[:, None], nodes, self.goal[:, None]], 1)   # [B, N, 3], N = n + 2
         seg = P[:, 1:] - P[:, :-1]                                            # [B, N-1, 3]
         sl = seg.norm(dim=-1)
@@ -84,8 +84,8 @@ class Legs:
         R = th[:, 3]
         tc = (1 - (dist - DRONE - R) / DANGER).clamp(0, 1)                    # 0 beyond the danger zone
         hit = dist < R + DRONE
-        J2 = tc.mean((-1, -2))
-        J2 = torch.where(hit.any(-1).any(-1), torch.full_like(J2, math.inf), J2)
+        J2soft = tc.mean((-1, -2))
+        J2 = torch.where(hit.any(-1).any(-1), torch.full_like(J2soft, math.inf), J2soft)
 
         z = nodes[..., 2]
         zmin, zmax = self.lo[2], self.hi[2]
@@ -100,4 +100,4 @@ class Legs:
             return F
         pen = ((R + DRONE - dist).clamp_min(0) / DANGER).sum((-1, -2))
         shortv = ((self.rmin[:, None] - sl).clamp_min(0) / self.rmin[:, None]).sum(-1) + short.float().sum(-1) * 0.1
-        return F, pen + shortv
+        return F, pen + shortv, J2soft
