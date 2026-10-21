@@ -120,6 +120,9 @@ def main():
     nm = load_nmopso(a.nmopso, len(legs_m)) if a.nmopso else {}
     rows = []
     for k, (F, enc) in enumerate(sols):
+        # the policy's default (zero action = straight, level path) is always one candidate
+        F = np.vstack([F, straight[k][0]]); enc = np.concatenate([enc, straight[k][1]])
+        sols[k] = (F, enc)
         feas = np.isfinite(F).all(1)
         row = dict(leg=k, rl_feasible_frac=float(feas.mean()), rl_front=len(nondominated(F[feas])) if feas.any() else 0)
         if feas.any():
