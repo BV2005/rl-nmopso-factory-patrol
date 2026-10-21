@@ -88,6 +88,23 @@ RL-warm NMOPSO-50, archive only & 0.830 & 0.138 & 37.5\\
 RL $\cup$ RL-warm NMOPSO-50 (ours) & 1.003 & 0.064 & 37.5\\\bottomrule
 \end{tabular}\end{table}
 
+\subsection{Path quality and robustness}
+For the path each method would fly (short-safe pick; \texttt{scripts/robustness.py}, 73 legs
+$\times$ 3 seeds, physical boxes, drone radius 0.3\,m): RL paths are 1.10$\times$ the straight
+distance against 1.36$\times$ for NMOPSO-500 (mean 3.44 vs 4.02\,m; on the whole patrol, drone 1's
+loop is 75.6 vs 115.1\,m), with similar interior clearance (5th percentile 0.94 vs 0.90\,m). No
+deployed path of any method collides nominally or with obstacles up to 0.3\,m larger than modelled.
+With Gaussian waypoint errors the collision probability is 0 at $\sigma=0.1$\,m for all methods and
+2.2\,\% (RL) vs 0.6\,\% (NMOPSO-500) at $\sigma=0.3$\,m, where RL's straight flight down 2\,m rack
+aisles keeps every waypoint near the racks. On 200 random legs up to 15\,m, RL finds no feasible path
+on 11\,\% (19\,\% beyond 11\,m); NMOPSO cannot start on 5\,\% (its initialisation resamples until a
+random path is feasible) and starts with probability below 0.5 on 22.5\,\%.
+\emph{Unexpected obstacle} (\texttt{scripts/replan\_obstacle.py}): a 0.6\,m object placed at the
+midpoint of 37 legs blocks 86--89\,\% of the planned paths. Replanning succeeds on the same 27 legs
+for all methods; the other 10 are blocked in the planner's model (aisle gaps of 0.65--0.85\,m) and
+NMOPSO never starts on them. RL replans in 1.2\,s and beats NMOPSO-50 + straight (38\,s) on 69\,\%
+of runs (ties 27\,\%, losses 4\,\%), with paths 1.29 vs 1.60$\times$ the straight distance.
+
 \subsection{What did not work}
 Preference conditioning (linear scalarisation) and threat-budget conditioning ($F_2\le u\,F_2^{\text{straight}}$,
 with penalties up to 50 per $\sigma_2$) were not learned: the mean action changed by $<0.03$ across the
