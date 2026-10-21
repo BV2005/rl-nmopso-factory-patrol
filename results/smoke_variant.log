@@ -1,0 +1,8 @@
+﻿Starting parallel pool (parpool) using the 'Processes' profile ...
+Connected to parallel pool with 1 workers.
+1 NMOPSO variant jobs (MaxIt 500, warm 0) on 1 workers
+15:10:13  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\smoke_equiv\leg001_seed1.mat  321 s, 50 front points
+1 NMOPSO variant jobs (MaxIt 50, warm 1) on 1 workers
+15:10:55  C:\Users\bhara\Downloads\rl_factory_patrol\.claude\worktrees\rl-nmopso\results\smoke_warm50\leg001_seed1.mat  34 s, 50 front points
+equivalence: same front size 1, max |diff| 0
+warm50: 34.1 s, 50 front points
