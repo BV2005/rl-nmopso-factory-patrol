@@ -35,7 +35,8 @@ S_MAX = 5.0                                      # scaled cost of a feasible pat
 INFEASIBLE = S_MAX + 1.0                         # so any feasible path beats any infeasible one
 SIG_R = 1.0                                      # a_r = +-1: step length x e^+-1
 YAW_MAX = math.pi / 2                            # a_yaw = +-1: +-90 deg from the goal bearing
-OBS_DIM = 3 + 1 + 1 + 3 + 1 + 1 + 1 + 2 + N_RAYS + 4
+OBS_DIM = 3 + 1 + 1 + 3 + 1 + 1 + 1 + 2 + N_RAYS + 4      # + 1 (threat budget u) when budget conditioning is on
+BUDGET_PEN = 5.0                                 # per F_SCALE[1] of threat above the budget
 
 
 RAY_DIRS = 64
@@ -92,11 +93,13 @@ def sample_pref(B, gen=None, dtype=torch.float64):
 
 
 class PathEnv:
-    def __init__(self, world, start, goal, pref, shape=0.0, scalar="linear", act_pen=0.0):
+    def __init__(self, world, start, goal, pref, shape=0.0, scalar="linear", act_pen=0.0, budget=None, budget_pen=BUDGET_PEN):
+        """budget: None, or u [B] - threat-budget conditioning: the path should keep F2 <= u * F2 of
+        the straight (zero-action) path (its F2 without the collision infinity); u is observed."""
         self.legs = Legs(world, start, goal)
         self.w = world
         self.pref = pref.to(self.legs.dist.dtype)
-        self.shape, self.scalar, self.act_pen = shape, scalar, act_pen
+        self.shape, self.scalar, self.act_pen, self.budget_pen = shape, scalar, act_pen, budget_pen
         B, dt = len(self.legs), self.legs.dist.dtype
         self.T = torch.eye(4, dtype=dt).repeat(B, 1, 1)                      # chain since startPosition
         self.q = self.legs.start.clone()                                    # last path point (clamped)
@@ -104,6 +107,14 @@ class PathEnv:
         self.i = 0
         self.zmid = (self.legs.lo[2] + self.legs.hi[2]) / 2
         self.zhalf = (self.legs.hi[2] - self.legs.lo[2]) / 2
+        self.u = None
+        if budget is not None:
+            ref = PathEnv(world, start, goal, pref)
+            for _ in range(N_NODES):
+                ref.step(torch.zeros(B, 3))
+            self.f2_straight = ref.legs.cost(ref.nodes, details=True)[2]
+            self.u = torch.as_tensor(budget, dtype=dt)
+            self.eps = self.u * self.f2_straight
 
     def pose(self):
         return self.legs.T0 @ self.T
@@ -139,7 +150,7 @@ class PathEnv:
         head = torch.atan2(R[:, 1, 0], R[:, 0, 0]) - bear                   # chain heading vs goal bearing
         o = torch.cat([g, reach, zc, off, left, D / 100, self.legs.rmax[:, None] / RAY_MAX,
                        torch.cos(head)[:, None], torch.sin(head)[:, None],
-                       self.rays(self.q, bear), self.pref], -1)
+                       self.rays(self.q, bear)] + ([self.u[:, None]] if self.u is not None else []) + [self.pref], -1)
         return o.float()
 
     def act(self, a):
@@ -176,8 +187,12 @@ class PathEnv:
         done = self.i == N_NODES
         if not done:
             return (self.potential() - phi0).float() - pen, False, None
-        F, viol = self.legs.cost(self.nodes, details=True)
+        F, viol, _ = self.legs.cost(self.nodes, details=True)
         feas = torch.isfinite(F).all(-1)
-        s = self.scalarise(F.nan_to_num(posinf=1e6)).clamp(max=S_MAX)
+        Ff = F.nan_to_num(posinf=1e6)
+        s = self.scalarise(Ff)
+        if self.u is not None:                                              # F2 is a budget, not a weight
+            s = s + self.budget_pen * (Ff[:, 1] - self.eps).clamp_min(0) / F_SCALE[1].item()
+        s = s.clamp(max=S_MAX)
         rew = torch.where(feas, -s, -(INFEASIBLE + viol.clamp(max=3.0))) - phi0   # Phi(terminal) = 0
         return rew.float() - pen, True, {"F": F, "feasible": feas}
