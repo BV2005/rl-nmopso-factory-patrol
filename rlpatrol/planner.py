@@ -17,6 +17,12 @@ because MyCost.m treats every obstacle as an infinitely tall cylinder.
 Legs whose end points are not free (inside a cylinder or its margin, e.g. a task above a machine)
 are planned between the nearest free points; the caller connects the real end points to them.
 
+Keep-in box (keep_in = (xmin, xmax, ymin, ymax) world metres, optional): the flight controller may
+clamp its targets to a smaller area than the NMOPSO model's map bounds (patrol_controller.c: |x| <= 12,
+|y| <= 7, against 13.35 / 8.35 here). A path through the difference would be flown clamped, i.e. not
+at all. With keep_in, a point outside the box is not free (end points, A* routes, line of sight) and
+a candidate path with a node outside it is not feasible, so only paths the controller flies are picked.
+
 Routes (plan_route). NMOPSO's encoding (10 nodes, step <= 0.3 x the straight distance, turns <= 45
 deg per node) cannot represent detours much longer than the leg, e.g. between two adjacent rack aisles
 around the rack. The offline pipeline never asks for such legs: planner/factory_patrol builds the
@@ -35,11 +41,13 @@ import torch
 from .env import F_SCALE, PathEnv
 from .metrics import short_safe
 from .nmopso_cost import N_NODES
-from .ppo import Actor, load_checkpoint, resolve_device
+from .ppo import Actor, load_checkpoint, net_shape, resolve_device
 from .refine import WEIGHTS, cem
 from .world import load_world
 
 SCALE = F_SCALE.numpy()
+U_SWEEP = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]           # threat budgets u
+BUDGET_PREFS = [[1, 0, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1], [1 / 3, 0, 1 / 3, 1 / 3]]  # w over F1, F3, F4
 
 
 def pref_set(K, seed=0):
@@ -50,6 +58,15 @@ def pref_set(K, seed=0):
     while len(P) < K:
         P.append(rng.dirichlet(np.ones(4)))
     return np.array(P[:K])
+
+
+def conditions(budget, K):
+    """the rollout conditions (prefs [C, 4], budgets [C] or None): K preferences, or for a
+    threat-budget checkpoint every U_SWEEP budget x BUDGET_PREFS preference (C = 48, K unused)."""
+    if budget:
+        P = np.array([p for _ in U_SWEEP for p in BUDGET_PREFS], float)
+        return P, np.repeat(U_SWEEP, len(BUDGET_PREFS)).astype(float)
+    return pref_set(K), None
 
 
 @dataclass
@@ -69,27 +86,41 @@ class LegPlan:
 
 class LegPlanner:
     def __init__(self, ckpt, n_prefs=50, n_samples=3, refine=True, device="cpu", threads=0, seed=0,
-                 free_search_radius=3.0):
+                 free_search_radius=3.0, keep_in=None):
         self.dev = resolve_device(device)
         if threads:
             torch.set_num_threads(threads)
         ck = load_checkpoint(ckpt, map_location=self.dev)
         cfg = ck["cfg"]
-        if cfg.get("budget", False):
-            raise ValueError(f"{ckpt}: threat-budget checkpoints are not supported by the online planner "
-                             "(they need a budget sweep; see scripts/evaluate.py)")
-        self.actor = Actor(cfg["hidden"], ctx=4).to(self.dev)
+        ctx, extra = net_shape(cfg)
+        self.actor = Actor(cfg["hidden"], ctx=ctx, extra=extra).to(self.dev)
         self.actor.load_state_dict(ck["actor"])
         self.actor.eval()
         self.ckpt_info = {"path": str(ckpt), "iteration": ck.get("it", len(ck.get("hist", [])) - 1),
-                          "seed": cfg.get("seed"), "hidden": cfg["hidden"], "format": ck.get("format", 1)}
+                          "seed": cfg.get("seed"), "hidden": cfg["hidden"], "format": ck.get("format", 1),
+                          **{k: cfg.get(k, False) for k in ("budget", "budget_obs", "route_obs")}}
         self.world = load_world(device=self.dev)
-        self.prefs = pref_set(n_prefs)
+        self.budget_obs, self.route_obs = cfg.get("budget_obs", False), cfg.get("route_obs", False)
+        self.prefs, self.budgets = conditions(cfg.get("budget", False), n_prefs)
+        self.ckpt_info["conditions"] = len(self.prefs)
         self.S, self.refine, self.seed, self.free_r = n_samples, refine, seed, free_search_radius
+        self.keep_in = None if keep_in is None else tuple(float(v) for v in keep_in)
+        self.ckpt_info["keep_in"] = self.keep_in
 
     # --- free space --------------------------------------------------------------------------------
+    def in_box(self, x, y):
+        """inside the keep-in box (everywhere without one); x, y arrays or scalars, world metres."""
+        if self.keep_in is None:
+            return np.ones(np.shape(x), bool)
+        x0, x1, y0, y1 = self.keep_in
+        return (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
+
+    def free(self, x, y):
+        """world.free inside the keep-in box."""
+        return self.world.free(x, y) & self.in_box(x, y)
+
     def is_free(self, xy):
-        return bool(self.world.free(np.float64(xy[0]), np.float64(xy[1])))
+        return bool(self.free(np.float64(xy[0]), np.float64(xy[1])))
 
     def nearest_free(self, xy):
         """xy itself if free, else the nearest free point on rings of 0.05 m up to free_search_radius
@@ -100,7 +131,7 @@ class LegPlanner:
         ang = np.linspace(0, 2 * np.pi, 72, endpoint=False)
         for r in np.arange(0.05, self.free_r + 1e-9, 0.05):
             c = xy + r * np.c_[np.cos(ang), np.sin(ang)]
-            ok = self.world.free(c[:, 0], c[:, 1])
+            ok = self.free(c[:, 0], c[:, 1])
             if ok.any():
                 return c[np.argmax(ok)]
         return None
@@ -112,11 +143,13 @@ class LegPlanner:
         C, rep = len(self.prefs), 1 + self.S
         L = np.repeat(leg[None], C * rep + 1, 0)                    # + 1: the straight path
         pr = torch.tensor(np.vstack([np.tile(self.prefs, (rep, 1)), self.prefs[:1]]))
+        bu = None if self.budgets is None else torch.tensor(np.r_[np.tile(self.budgets, rep), self.budgets[:1]])
         det = torch.tensor([True] * C + [False] * C * self.S + [True], device=self.dev)
         straight = torch.zeros(len(L), dtype=torch.bool, device=self.dev)
         straight[-1] = True
         w = self.world
-        env = PathEnv(w, w.to_units(L[:, :3]), w.to_units(L[:, 3:]), pr)
+        env = PathEnv(w, w.to_units(L[:, :3]), w.to_units(L[:, 3:]), pr, budget=bu, budget_obs=self.budget_obs,
+                      route_obs=self.route_obs)
         enc = []
         with torch.no_grad():
             for _ in range(N_NODES):
@@ -146,7 +179,7 @@ class LegPlanner:
             return LegPlan(True, P, [0.0] * 4, "trivial", s_free, g_free, 1, 1, time.perf_counter() - t0)
         leg = np.array([s_free[0], s_free[1], z, g_free[0], g_free[1], z])
         F, nodes, enc = self._rollouts(leg, seed)
-        feas = np.isfinite(F).all(1)
+        feas = np.isfinite(F).all(1) & self._nodes_in_box(nodes)
         method = "rl"
         n_cand, n_feas = len(F), int(feas.sum())
         if not feas.any() and self.refine:
@@ -165,6 +198,8 @@ class LegPlanner:
                 e = torch.as_tensor(enc, device=self.dev)
                 nodes = torch.cat([lg.decode(e[i:i + 1, 0], e[i:i + 1, 1], e[i:i + 1, 2]) for i in range(len(e))]
                                   ).cpu().numpy()
+                feas &= self._nodes_in_box(nodes)
+                n_feas = int(feas.sum())
         if not feas.any():
             return LegPlan(False, nothing, [math.inf] * 4, "none", s_free, g_free, n_cand, 0,
                            time.perf_counter() - t0, reason="no feasible candidate (policy"
@@ -177,20 +212,27 @@ class LegPlanner:
         P = np.vstack([[*s_free, z], w.to_metres(nodes[j]), [*g_free, z]])
         return LegPlan(True, P, F[j].tolist(), method, s_free, g_free, n_cand, n_feas, time.perf_counter() - t0)
 
+    def _nodes_in_box(self, nodes):
+        """[m] bool: every node of each path [m, n, 3] (NMOPSO units) inside the keep-in box."""
+        if self.keep_in is None:
+            return np.ones(len(nodes), bool)
+        P = self.world.to_metres(nodes)
+        return self.in_box(P[..., 0], P[..., 1]).all(-1)
+
     # --- routes: direct leg, else line-of-sight sub-legs of an A* route -----------------------------
     def _grid(self):
         if not hasattr(self, "_free_grid"):
             h, res = self.world.hall, 0.2
             xs, ys = np.arange(h[0], h[1] + 1e-9, res), np.arange(h[2], h[3] + 1e-9, res)
             X, Y = np.meshgrid(xs, ys, indexing="ij")
-            self._free_grid = (xs, ys, res, self.world.free(X, Y))
+            self._free_grid = (xs, ys, res, self.free(X, Y))
         return self._free_grid
 
     def line_of_sight(self, a, b, step=0.05):
         n = max(2, int(np.ceil(np.linalg.norm(np.subtract(b, a)) / step)) + 1)
         t = np.linspace(0, 1, n)[:, None]
         q = np.asarray(a) + t * (np.asarray(b) - np.asarray(a))
-        return bool(self.world.free(q[:, 0], q[:, 1]).all())
+        return bool(self.free(q[:, 0], q[:, 1]).all())
 
     def astar(self, a, b):
         """8-connected A* on a 0.2 m grid of world.free from free point a to free point b; [m, 2] metres

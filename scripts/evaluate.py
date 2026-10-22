@@ -31,24 +31,14 @@ sys.path.insert(0, str(ROOT))
 from rlpatrol.env import F_SCALE, PathEnv  # noqa: E402
 from rlpatrol.metrics import add_eps, hypervolume, igd_plus, nondominated, short_safe  # noqa: E402
 from rlpatrol.nmopso_cost import ANGLE, N_NODES, Legs  # noqa: E402
-from rlpatrol.planner import pref_set  # noqa: E402  (shared with the online planner)
+from rlpatrol.planner import BUDGET_PREFS, U_SWEEP, conditions, pref_set  # noqa: E402,F401  (shared with the online planner)
 from rlpatrol.ppo import Actor, net_shape  # noqa: E402
 from rlpatrol.refine import WEIGHTS, cem  # noqa: E402
 from rlpatrol.world import DATA, load_world  # noqa: E402
 
 REF = 1.1
 TIE = 1e-3
-U_SWEEP = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
-BUDGET_PREFS = [[1, 0, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1], [1 / 3, 0, 1 / 3, 1 / 3]]
 SCALE = F_SCALE.numpy()
-
-
-def conditions(budget, K):
-    """(prefs [C, 4], budgets [C] or None)."""
-    if budget:
-        P = np.array([p for _ in U_SWEEP for p in BUDGET_PREFS], float)
-        return P, np.repeat(U_SWEEP, len(BUDGET_PREFS)).astype(float)
-    return pref_set(K), None
 
 
 def rl_solve(actor, world, legs_m, prefs, budgets, S, seed=0, budget_obs=False, route_obs=False):
