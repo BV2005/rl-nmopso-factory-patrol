@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .env import BUDGET_OBS, N_NODES, OBS_DIM, PathEnv, sample_pref
+from .env import BUDGET_OBS, N_NODES, OBS_DIM, ROUTE_OBS, PathEnv, sample_pref
 from .legs import random_legs
 
 
@@ -44,6 +44,7 @@ class Config:
     budget_pen: float = 5.0         # reward per F_SCALE[1] of threat above the budget
     dense: bool = False             # pay the threat (w2) and the budget overshoot per segment (same return)
     budget_obs: bool = False        # observe the budget left and the straight path's threat to go (needs budget)
+    route_obs: bool = False         # observe the shortest collision-free route (waypoint bearing, length left)
     seed: int = 1
     threads: int = 0                # 0: torch default
     device: str = "cpu"             # cpu | cuda | auto (cuda if available)
@@ -116,9 +117,10 @@ class Actor(nn.Module):
 
 def net_shape(cfg):
     """(ctx, extra) of a Config or a checkpoint's cfg dict: conditioning entries (preference, + u with
-    budget conditioning) and extra observation entries (budget_obs)."""
+    budget conditioning) and extra observation entries (budget_obs, route_obs)."""
     get = cfg.get if isinstance(cfg, dict) else lambda k, d=None: getattr(cfg, k, d)
-    return (5 if get("budget", False) else 4), (BUDGET_OBS if get("budget_obs", False) else 0)
+    return ((5 if get("budget", False) else 4),
+            (BUDGET_OBS if get("budget_obs", False) else 0) + (ROUTE_OBS if get("route_obs", False) else 0))
 
 
 def training_legs(world, n, rng, cfg):
@@ -137,9 +139,9 @@ def sample_budget_pref(B, cfg, gen=None):
 
 
 def rollout(actor, world, legs_m, pref, deterministic=False, shape=0.0, scalar="linear", act_pen=0.0, budget=None,
-            budget_pen=5.0, dense=False, budget_obs=False):
+            budget_pen=5.0, dense=False, budget_obs=False, route_obs=False):
     env = PathEnv(world, world.to_units(legs_m[:, :3]), world.to_units(legs_m[:, 3:]), pref, shape, scalar, act_pen, budget,
-                  budget_pen, dense, budget_obs)
+                  budget_pen, dense, budget_obs, route_obs)
     O, U, LP, R = [], [], [], []
     info = None
     for _ in range(N_NODES):
@@ -157,9 +159,10 @@ def det_probe(actor, world, legs, cfg):
     g = torch.Generator().manual_seed(5)
     if cfg.budget:
         w, u = sample_budget_pref(n, cfg, g)
-        _, _, _, _, info, _ = rollout(actor, world, legs, w, True, budget=u, budget_obs=cfg.budget_obs)
+        _, _, _, _, info, _ = rollout(actor, world, legs, w, True, budget=u, budget_obs=cfg.budget_obs,
+                                      route_obs=cfg.route_obs)
     else:
-        _, _, _, _, info, _ = rollout(actor, world, legs, sample_pref(n, g), True)
+        _, _, _, _, info, _ = rollout(actor, world, legs, sample_pref(n, g), True, route_obs=cfg.route_obs)
     feas = info["feasible"]; F = info["F"][feas]
     out = {"det_feasible": feas.float().mean().item(), "det_F": F.mean(0).tolist() if len(F) else [math.nan] * 4}
     if cfg.budget:                       # F2 / straight F2 achieved for a tight and a loose budget
@@ -167,14 +170,14 @@ def det_probe(actor, world, legs, cfg):
         out["budget_F2_ratio"] = []
         for uu in (0.3, 1.0):
             _, _, _, _, info, env = rollout(actor, world, legs, w, True, budget=torch.full((n,), uu, dtype=torch.float64),
-                                            budget_obs=cfg.budget_obs)
+                                            budget_obs=cfg.budget_obs, route_obs=cfg.route_obs)
             ok = info["feasible"] & (env.f2_straight > 0)
             out["budget_F2_ratio"].append((info["F"][ok, 1] / env.f2_straight[ok]).median().item() if ok.any() else math.nan)
         return out
     corner = []
     for j in range(4):
         w = torch.zeros(n, 4, dtype=torch.float64); w[:, j] = 1
-        _, _, _, _, info, _ = rollout(actor, world, legs, w, True)
+        _, _, _, _, info, _ = rollout(actor, world, legs, w, True, route_obs=cfg.route_obs)
         Fj = info["F"][info["feasible"]]
         corner.append(Fj[:, j].mean().item() if len(Fj) else math.nan)
     out["corner_Fj"] = corner          # F_j under w = e_j (should be the lowest F_j of any preference)
@@ -266,7 +269,7 @@ def train(world, cfg: Config, log=print, ckpt=None, resume=None, metrics=None, s
             pref, bud = sample_pref(cfg.batch), None
         O, U, LP, R, info, _ = rollout(actor, world, legs, pref, shape=cfg.shape, scalar=cfg.scalar,
                                        act_pen=cfg.act_pen, budget=bud, budget_pen=cfg.budget_pen,
-                                       dense=cfg.dense, budget_obs=cfg.budget_obs)
+                                       dense=cfg.dense, budget_obs=cfg.budget_obs, route_obs=cfg.route_obs)
         if not _finite(O, U, LP, R):
             bad += 1
             log(f"it {it:4d}  non-finite observation/action/reward in the rollout: update skipped ({bad} in a row)")

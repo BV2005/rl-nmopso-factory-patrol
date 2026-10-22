@@ -62,10 +62,10 @@ def main():
         ck = torch.load(ROOT / "results" / "ckpt" / f"{name}.pt", map_location="cpu", weights_only=False)
         cfg = ck["cfg"]; ctx, extra = net_shape(cfg)
         actor = Actor(cfg["hidden"], ctx=ctx, extra=extra); actor.load_state_dict(ck["actor"]); actor.eval()
-        budget, bobs = cfg.get("budget", False), cfg.get("budget_obs", False)
+        budget, bobs, robs = cfg.get("budget", False), cfg.get("budget_obs", False), cfg.get("route_obs", False)
         prefs, budgets = conditions(budget, 50)
-        sols, _ = rl_solve(actor, world, legs, prefs, budgets, 3, budget_obs=bobs)
-        r = {"budget": budget, "dense": cfg.get("dense", False), "budget_obs": bobs}
+        sols, _ = rl_solve(actor, world, legs, prefs, budgets, 3, budget_obs=bobs, route_obs=robs)
+        r = {"budget": budget, "dense": cfg.get("dense", False), "budget_obs": bobs, "route_obs": robs}
         if budget:                                              # the first C rollouts of a leg are deterministic
             bal = [i for i in range(len(prefs)) if np.allclose(prefs[i], BALANCED)]
             r["u"], r["F2_over_straight"], r["within_budget"] = [], [], []

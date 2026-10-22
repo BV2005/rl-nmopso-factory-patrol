@@ -26,6 +26,10 @@ Reward: a preference w on the 4-simplex is drawn per episode and observed by the
 Observation option (budget_obs, with budget conditioning): BUDGET_OBS entries before u, in
 F_SCALE[1] units: the budget left (u * straight F2 - threat of the segments so far) and the threat
 of flying straight from the current point to the goal over the remaining segments.
+Observation option (route_obs, round B): ROUTE_OBS entries before the budget state, from the
+precomputed shortest collision-free routes (rlpatrol/route.py): cos and sin of the route waypoint's
+bearing relative to the goal bearing (1, 0 whenever the goal is visible), the route length left over
+the reach left (segments left x VarMax.r; > 1: the goal is out of reach), and over the straight distance.
 """
 import hashlib
 import math
@@ -35,6 +39,7 @@ import torch
 
 from .world import DATA
 from .nmopso_cost import ANGLE, DANGER, DRONE, N_NODES, Legs, tmat
+from .route import route_features
 
 N_RAYS = 16
 RAY_MAX = 40.0                         # units (4 m)
@@ -46,6 +51,7 @@ YAW_MAX = math.pi / 2                            # a_yaw = +-1: +-90 deg from th
 OBS_DIM = 3 + 1 + 1 + 3 + 1 + 1 + 1 + 2 + N_RAYS + 4      # + 1 (threat budget u) when budget conditioning is on
 BUDGET_PEN = 5.0                                 # per F_SCALE[1] of threat above the budget
 BUDGET_OBS = 2                                   # extra observation entries with budget_obs
+ROUTE_OBS = 4                                    # extra observation entries with route_obs
 N_SEGS = N_NODES + 1                             # start -> node 1 -> ... -> node n -> goal
 
 
@@ -141,10 +147,10 @@ def seg_threat(world, P):
 
 class PathEnv:
     def __init__(self, world, start, goal, pref, shape=0.0, scalar="linear", act_pen=0.0, budget=None, budget_pen=BUDGET_PEN,
-                 dense=False, budget_obs=False):
+                 dense=False, budget_obs=False, route_obs=False):
         """budget: None, or u [B] - threat-budget conditioning: the path should keep F2 <= u * F2 of
         the straight (zero-action) path (its F2 without the collision infinity); u is observed.
-        dense, budget_obs: see the module doc."""
+        dense, budget_obs, route_obs: see the module doc."""
         if budget_obs and budget is None:
             raise ValueError("budget_obs needs budget conditioning")
         if dense and scalar != "linear":
@@ -158,7 +164,7 @@ class PathEnv:
         self.q = self.legs.start.clone()                                    # last path point (clamped)
         self.nodes = torch.zeros(B, N_NODES, 3, dtype=dt, device=dev)
         self.i = 0
-        self.dense, self.budget_obs = dense, budget_obs
+        self.dense, self.budget_obs, self.route_obs = dense, budget_obs, route_obs
         self.prev = self.legs.start.clone()                                 # start of the next segment
         self.c = torch.zeros(B, dtype=dt, device=dev)                       # J2 share of the segments so far
         self.paid = torch.zeros(B, dtype=dt, device=dev)                    # dense rewards paid so far
@@ -209,9 +215,21 @@ class PathEnv:
         head = torch.atan2(R[:, 1, 0], R[:, 0, 0]) - bear                   # chain heading vs goal bearing
         o = torch.cat([g, reach, zc, off, left, D / 100, self.legs.rmax[:, None] / RAY_MAX,
                        torch.cos(head)[:, None], torch.sin(head)[:, None],
-                       self.rays(self.q, bear)] + self.budget_state() + ([self.u[:, None]] if self.u is not None else [])
+                       self.rays(self.q, bear)] + self.route_state(bear) + self.budget_state()
+                      + ([self.u[:, None]] if self.u is not None else [])
                       + [self.pref], -1)
         return o.float()
+
+    def route_state(self, bear):
+        """[] or [cos, sin of the waypoint bearing - goal bearing, route left / reach left, route left / straight]."""
+        if not self.route_obs:
+            return []
+        wp, L = route_features(self.w, self.q[:, :2], self.legs.goal[:, :2])
+        rel = torch.atan2(wp[:, 1] - self.q[:, 1], wp[:, 0] - self.q[:, 0]) - bear
+        straight = (self.legs.goal[:, :2] - self.q[:, :2]).norm(dim=-1)
+        reach = (L / (self.segs_left() * self.legs.rmax)).nan_to_num(3.0).clamp(0, 3)
+        detour = (L / straight.clamp_min(1e-6)).nan_to_num(4.0).clamp(1, 4) - 1
+        return [torch.cos(rel)[:, None], torch.sin(rel)[:, None], reach[:, None], detour[:, None]]
 
     def budget_state(self):
         """[] or [budget left, straight threat to go] ([B, 1] each, F_SCALE[1] units, clamped to +-5)."""
