@@ -164,6 +164,9 @@ Times are for a 12-core laptop CPU without a GPU.
 | Warm and cold NMOPSO-50 (MATLAB) | `matlab -batch "cd matlab; run_nmopso_variant('../data/legs_real.mat','../results/nmopso_warm50',1:3,4,50,'../data/warm_v2_real.mat'); run_nmopso_variant('../data/legs_real.mat','../results/nmopso_cold50',1:3,4,50,'')"` | 75 min |
 | Tables | `python scripts/final_compare.py`, `python scripts/robustness.py` | min |
 | Obstacle replanning | `python scripts/replan_obstacle.py prep`, then the two MATLAB calls in its docstring, then `... analyse` | 45 min |
+| Quality along a training run (`results/snapshot_sweep.json`) | `python scripts/snapshot_sweep.py v5_seed1 v5_seed2 v5_seed3 --extra v2` | 10 min |
+| Threat-budget response, low-threat end vs NMOPSO (`results/budget_response.json`) | `python scripts/budget_response.py v2 v4 vA_seed1 vA_seed2 vA_seed3 vA_ctrl_seed1` | 2 min |
+| Legs without a feasible RL path (`results/hard_legs_<eval>.json`) | `python scripts/hard_legs.py results/eval_v5_seed1_random.json` | 1 min |
 
 The unmodified NMOPSO loops forever if no random start path is feasible. `run_nmopso_variant`
 takes a timeout for that case; `run_nmopso_legs` (the plain baseline) has none, and none was needed
