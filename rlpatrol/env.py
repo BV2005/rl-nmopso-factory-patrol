@@ -21,8 +21,13 @@ Reward: a preference w on the 4-simplex is drawn per episode and observed by the
   optional  dense threat (dense): J2 is a mean over segments, so each step is paid -w2 * (its new
             segment's share of J2) / F_SCALE[1], plus the growth of the budget overshoot; the terminal
             reward is the usual one minus what was already paid, so every path's return is unchanged.
-            At most S_MAX is paid early, so that remainder is never positive (a capped cost or a
-            collision would otherwise refund it and credit the later steps).
+            What is paid early is the capped cost of the segments so far (cap(.) of their threat and
+            budget terms), so that remainder is never positive (a capped cost or a collision would
+            otherwise refund it and credit the later steps).
+  optional  soft cap (soft_cap, round C): the scaled cost of a feasible path is capped by
+            S_MAX * tanh(s / SOFT_SCALE) instead of min(s, S_MAX). Still below S_MAX (any feasible path
+            beats any infeasible one) and monotone, but never flat: a path far over its threat budget
+            still gains from lowering its threat.
 Observation option (budget_obs, with budget conditioning): BUDGET_OBS entries before u, in
 F_SCALE[1] units: the budget left (u * straight F2 - threat of the segments so far) and the threat
 of flying straight from the current point to the goal over the remaining segments.
@@ -46,6 +51,7 @@ RAY_MAX = 40.0                         # units (4 m)
 F_SCALE = torch.tensor([0.5, 0.02, 1.0, 0.2])   # p95 of NMOPSO's fronts on the factory2_auto plan (scripts/front_stats.py)
 S_MAX = 5.0                                      # scaled cost of a feasible path is capped here
 INFEASIBLE = S_MAX + 1.0                         # so any feasible path beats any infeasible one
+SOFT_SCALE = 4 * S_MAX                           # soft cap: S_MAX * tanh(s / SOFT_SCALE), slope 1/4 at 0
 SIG_R = 1.0                                      # a_r = +-1: step length x e^+-1
 YAW_MAX = math.pi / 2                            # a_yaw = +-1: +-90 deg from the goal bearing
 OBS_DIM = 3 + 1 + 1 + 3 + 1 + 1 + 1 + 2 + N_RAYS + 4      # + 1 (threat budget u) when budget conditioning is on
@@ -147,10 +153,10 @@ def seg_threat(world, P):
 
 class PathEnv:
     def __init__(self, world, start, goal, pref, shape=0.0, scalar="linear", act_pen=0.0, budget=None, budget_pen=BUDGET_PEN,
-                 dense=False, budget_obs=False, route_obs=False):
+                 dense=False, budget_obs=False, route_obs=False, soft_cap=False):
         """budget: None, or u [B] - threat-budget conditioning: the path should keep F2 <= u * F2 of
         the straight (zero-action) path (its F2 without the collision infinity); u is observed.
-        dense, budget_obs, route_obs: see the module doc."""
+        dense, budget_obs, route_obs, soft_cap: see the module doc."""
         if budget_obs and budget is None:
             raise ValueError("budget_obs needs budget conditioning")
         if dense and scalar != "linear":
@@ -164,7 +170,7 @@ class PathEnv:
         self.q = self.legs.start.clone()                                    # last path point (clamped)
         self.nodes = torch.zeros(B, N_NODES, 3, dtype=dt, device=dev)
         self.i = 0
-        self.dense, self.budget_obs, self.route_obs = dense, budget_obs, route_obs
+        self.dense, self.budget_obs, self.route_obs, self.soft_cap = dense, budget_obs, route_obs, soft_cap
         self.prev = self.legs.start.clone()                                 # start of the next segment
         self.c = torch.zeros(B, dtype=dt, device=dev)                       # J2 share of the segments so far
         self.paid = torch.zeros(B, dtype=dt, device=dev)                    # dense rewards paid so far
@@ -264,6 +270,10 @@ class PathEnv:
             return (self.pref * Fs).max(-1).values + 0.05 * (self.pref * Fs).sum(-1)
         return (self.pref * Fs).sum(-1)
 
+    def cap(self, s):
+        """the capped scaled cost of a feasible path: min(s, S_MAX), or the soft cap."""
+        return S_MAX * torch.tanh(s / SOFT_SCALE) if self.soft_cap else s.clamp(max=S_MAX)
+
     def step(self, a):
         phi0 = self.potential()
         pen = (self.act_pen * a.to(self.T).pow(2).sum(-1)).float()   # straight prior (training only)
@@ -272,17 +282,17 @@ class PathEnv:
         self.q = self.legs.clamp(self.pose()[:, :3, 3])
         self.nodes[:, self.i] = self.q
         self.i += 1
-        c0, self.c = self.c, self.c + seg_threat(self.w, torch.stack([self.prev, self.q], 1))[:, 0]
+        self.c = self.c + seg_threat(self.w, torch.stack([self.prev, self.q], 1))[:, 0]
         self.prev = self.q
         done = self.i == N_NODES
         if not done:
             d = torch.zeros_like(self.c)
-            if self.dense:                                                  # this segment's threat, as it is flown
-                d = -self.pref[:, 1] * (self.c - c0) / F_SCALE[1].item()
-                if self.u is not None:
-                    d = d - self.budget_pen * ((self.c - self.eps).clamp_min(0) - (c0 - self.eps).clamp_min(0)) / F_SCALE[1].item()
-                d = (self.paid + d).clamp_min(-S_MAX) - self.paid               # paid >= -S_MAX: the terminal
-                self.paid = self.paid + d                                       # remainder is never a refund
+            if self.dense:                                                  # this segment's threat, as it is flown:
+                part = self.pref[:, 1] * self.c / F_SCALE[1].item()         # the threat and budget terms of the
+                if self.u is not None:                                      # segments so far, capped as the
+                    part = part + self.budget_pen * (self.c - self.eps).clamp_min(0) / F_SCALE[1].item()
+                d = -self.cap(part) - self.paid                             # whole cost is (the terminal
+                self.paid = self.paid + d                                   # remainder is never a refund)
             return (self.potential() - phi0 + d).float() - pen, False, None
         F, viol, _ = self.legs.cost(self.nodes, details=True)
         feas = torch.isfinite(F).all(-1)
@@ -290,7 +300,7 @@ class PathEnv:
         s = self.scalarise(Ff)
         if self.u is not None:                                              # F2 is a budget, not a weight
             s = s + self.budget_pen * (Ff[:, 1] - self.eps).clamp_min(0) / F_SCALE[1].item()
-        s = s.clamp(max=S_MAX)
+        s = self.cap(s)
         rew = torch.where(feas, -s, -(INFEASIBLE + viol.clamp(max=3.0))) - phi0   # Phi(terminal) = 0
         rew = rew - self.paid                                               # dense: the return is unchanged
         return rew.float() - pen, True, {"F": F, "feasible": feas}
