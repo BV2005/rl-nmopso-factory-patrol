@@ -45,6 +45,7 @@ class Config:
     dense: bool = False             # pay the threat (w2) and the budget overshoot per segment (same return)
     budget_obs: bool = False        # observe the budget left and the straight path's threat to go (needs budget)
     route_obs: bool = False         # observe the shortest collision-free route (waypoint bearing, length left)
+    soft_cap: bool = False          # cap the scaled cost by S_MAX * tanh(s / SOFT_SCALE), never flat (round C)
     seed: int = 1
     threads: int = 0                # 0: torch default
     device: str = "cpu"             # cpu | cuda | auto (cuda if available)
@@ -139,9 +140,9 @@ def sample_budget_pref(B, cfg, gen=None):
 
 
 def rollout(actor, world, legs_m, pref, deterministic=False, shape=0.0, scalar="linear", act_pen=0.0, budget=None,
-            budget_pen=5.0, dense=False, budget_obs=False, route_obs=False):
+            budget_pen=5.0, dense=False, budget_obs=False, route_obs=False, soft_cap=False):
     env = PathEnv(world, world.to_units(legs_m[:, :3]), world.to_units(legs_m[:, 3:]), pref, shape, scalar, act_pen, budget,
-                  budget_pen, dense, budget_obs, route_obs)
+                  budget_pen, dense, budget_obs, route_obs, soft_cap)
     O, U, LP, R = [], [], [], []
     info = None
     for _ in range(N_NODES):
@@ -269,7 +270,8 @@ def train(world, cfg: Config, log=print, ckpt=None, resume=None, metrics=None, s
             pref, bud = sample_pref(cfg.batch), None
         O, U, LP, R, info, _ = rollout(actor, world, legs, pref, shape=cfg.shape, scalar=cfg.scalar,
                                        act_pen=cfg.act_pen, budget=bud, budget_pen=cfg.budget_pen,
-                                       dense=cfg.dense, budget_obs=cfg.budget_obs, route_obs=cfg.route_obs)
+                                       dense=cfg.dense, budget_obs=cfg.budget_obs, route_obs=cfg.route_obs,
+                                       soft_cap=cfg.soft_cap)
         if not _finite(O, U, LP, R):
             bad += 1
             log(f"it {it:4d}  non-finite observation/action/reward in the rollout: update skipped ({bad} in a row)")
