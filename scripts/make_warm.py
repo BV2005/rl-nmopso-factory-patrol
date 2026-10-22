@@ -50,7 +50,8 @@ if __name__ == "__main__":
     actor = Actor(ck["cfg"]["hidden"], ctx=ctx, extra=extra); actor.load_state_dict(ck["actor"]); actor.eval()
     prefs, budgets = conditions(budget, 50)
     t0 = time.perf_counter()
-    sols, _ = rl_solve(actor, world, legs_m, prefs, budgets, a.S, budget_obs=ck["cfg"].get("budget_obs", False))
+    sols, _ = rl_solve(actor, world, legs_m, prefs, budgets, a.S, budget_obs=ck["cfg"].get("budget_obs", False),
+                       route_obs=ck["cfg"].get("route_obs", False))
     straight, _ = rl_solve(None, world, legs_m, prefs[:1], None if budgets is None else budgets[:1], 0)
     K, n = len(legs_m), sols[0][1].shape[-1]
     R = np.zeros((K, a.M, n)); PS = np.zeros((K, a.M, n)); PH = np.zeros((K, a.M, n)); cnt = np.zeros(K)

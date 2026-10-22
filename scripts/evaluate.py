@@ -51,7 +51,7 @@ def conditions(budget, K):
     return pref_set(K), None
 
 
-def rl_solve(actor, world, legs_m, prefs, budgets, S, seed=0, budget_obs=False):
+def rl_solve(actor, world, legs_m, prefs, budgets, S, seed=0, budget_obs=False, route_obs=False):
     """all legs at once: per leg (F [m, 4], enc [m, 3, n]) of all rollouts (actor None: zero action),
     and the wall time."""
     torch.manual_seed(seed)
@@ -61,7 +61,8 @@ def rl_solve(actor, world, legs_m, prefs, budgets, S, seed=0, budget_obs=False):
     bu = None if budgets is None else torch.tensor(np.tile(np.tile(budgets, rep), nL))
     det = torch.tensor(([True] * C + [False] * C * S) * nL)
     t0 = time.perf_counter()
-    env = PathEnv(world, world.to_units(Lr[:, :3]), world.to_units(Lr[:, 3:]), pr, budget=bu, budget_obs=budget_obs)
+    env = PathEnv(world, world.to_units(Lr[:, :3]), world.to_units(Lr[:, 3:]), pr, budget=bu, budget_obs=budget_obs,
+                  route_obs=route_obs)
     enc = []
     for _ in range(N_NODES):
         with torch.no_grad():
@@ -151,12 +152,13 @@ def main():
     legs_m = loadmat(DATA / f"legs_{a.legs}.mat")["legs"]
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
     budget = ck["cfg"].get("budget", False)
-    bobs = ck["cfg"].get("budget_obs", False)
+    bobs, robs = ck["cfg"].get("budget_obs", False), ck["cfg"].get("route_obs", False)
     ctx, extra = net_shape(ck["cfg"])
     actor = Actor(ck["cfg"]["hidden"], ctx=ctx, extra=extra); actor.load_state_dict(ck["actor"]); actor.eval()
     prefs, budgets = conditions(budget, a.K)
-    sols, wall = rl_solve(actor, world, legs_m, prefs, budgets, a.S, budget_obs=bobs)
-    t0 = time.perf_counter(); rl_solve(actor, world, legs_m[:1], prefs, budgets, a.S, budget_obs=bobs); lat = time.perf_counter() - t0
+    sols, wall = rl_solve(actor, world, legs_m, prefs, budgets, a.S, budget_obs=bobs, route_obs=robs)
+    t0 = time.perf_counter(); rl_solve(actor, world, legs_m[:1], prefs, budgets, a.S, budget_obs=bobs, route_obs=robs)
+    lat = time.perf_counter() - t0
     straight, _ = rl_solve(None, world, legs_m, prefs[:1], None if budgets is None else budgets[:1], 0)
     sols = [(np.vstack([F, straight[k][0]]), np.concatenate([e, straight[k][1]])) for k, (F, e) in enumerate(sols)]
     n_rl = len(sols[0][0])
