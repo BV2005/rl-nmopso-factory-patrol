@@ -33,10 +33,24 @@ of the `factory2_auto_full` plan, with 3 NMOPSO seeds each.
 | NMOPSO, 500 iterations, plus the straight path | **1.050** | **0.012** | 369 s |
 | **RL proposals** (3 training seeds) | 0.975 ± 0.004 | 0.097 | **0.2 s** |
 | **RL proposals ∪ RL-warm-started NMOPSO-50** | 1.003 | 0.064 | 37.5 s |
+| **RL proposals, threat-budget conditioned with route guidance** (vB, 3 training seeds; rounds 6–7) | 1.042 ± 0.008 | – | **0.07 s** |
 
 - **RL proposals alone** beat NMOPSO-50 + straight by about 8 % in HV, at 1/190 of its time.
 - **The hybrid** beats it by 11.4 % (better on 68 % of runs, worse on 3 %, Wilcoxon p ≈ 0).
-- **Full NMOPSO-500 given the straight path remains the best front,** 4.4 % above the hybrid, at 10× the time.
+- **Full NMOPSO-500 given the straight path remains the best front,** but vB comes within 1 % of it
+  (two of its three seeds within 0.3 %) at about 1/5000 of the time: better than NMOPSO-500 + straight on
+  26 % of legs, tied on 30 %, worse on 44 %.
+- The vB row is from `scripts/evaluate.py` (12 threat budgets × 4 preferences per leg) and its time is
+  measured on a different machine than the rows above: there v2 takes 0.03 s per leg. IGD+ is not
+  comparable across the two scripts (different reference fronts), so it is left out.
+
+**Hard legs** (`scripts/evaluate.py --legs random` and `--legs blocked`; the blocked set is 200 held-out
+legs whose straight line is blocked but that the NMOPSO encoding can solve): legs without any feasible RL path
+
+| | random legs | blocked legs |
+|---|---|---|
+| v2 | 22 / 200 | 40 / 200 |
+| vB (3 seeds) | **7–8 / 200** | **14–15 / 200** |
 
 **Path quality and robustness** of the path each method would fly (`scripts/robustness.py`;
 physical obstacle boxes, drone radius 0.3 m):
@@ -63,8 +77,12 @@ departure delays that are robust to ±6 s of timing error, both plans flew with 
 | Failsafes / yield holds | 0 / 0 | 0 / 0 |
 
 **What did not work** (see `LOOP.md` for every round of the improvement loop):
-- PPO did not learn preference or threat-budget conditioning in this setting, so the low-threat end of the front comes from NMOPSO.
-- RL finds no feasible path on 11 % of long random legs (8–15 m).
+- PPO did not learn preference conditioning, and learned threat-budget conditioning only once trained at scale
+  (round 6; at the original training size it ignored the budget). Even then the policy's lowest threat levels off
+  at about half the straight path's, where NMOPSO reaches 0.30 of it: the low-threat end of the front still comes
+  from NMOPSO.
+- Training longer at the original settings (round 5b) did not improve the front, only feasibility.
+- RL (v2) finds no feasible path on 11 % of random legs; route guidance (round 7) brings this to 4 %.
 - The first flight of the plan as generated ended in a mid-air collision over a launch pad (`results/flights/rl_20261021_152127/FINDINGS.md`). That led to the pad-safe transits.
 
 ## Repository layout
