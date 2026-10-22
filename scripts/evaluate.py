@@ -1,5 +1,9 @@
 ﻿"""Evaluates a trained policy against the authors' NMOPSO on a benchmark leg set.
   python scripts/evaluate.py --ckpt results/ckpt/v3.pt --legs real [--nmopso results/nmopso_real] [--refine]
+                             [--tag NAME] [--overwrite]
+Writes results/eval_<tag>.json and results/rl_solutions_<tag>.mat, tag = <ckpt stem>_<legs>[_ls] by
+default; an existing file is never replaced without --overwrite (the published v2 results live there).
+Runs on the CPU on purpose: its timings are compared with NMOPSO's single-core times.
 Fronts per leg (all feasible, non-dominated, scored with the MyCost port; re-scored by MATLAB via
 the saved solutions):
   rl         policy rollouts (deterministic + S samples per condition) plus the straight path
@@ -27,7 +31,8 @@ sys.path.insert(0, str(ROOT))
 from rlpatrol.env import F_SCALE, PathEnv  # noqa: E402
 from rlpatrol.metrics import add_eps, hypervolume, igd_plus, nondominated, short_safe  # noqa: E402
 from rlpatrol.nmopso_cost import ANGLE, N_NODES, Legs  # noqa: E402
-from rlpatrol.ppo import Actor  # noqa: E402
+from rlpatrol.planner import pref_set  # noqa: E402  (shared with the online planner)
+from rlpatrol.ppo import Actor, net_shape  # noqa: E402
 from rlpatrol.refine import WEIGHTS, cem  # noqa: E402
 from rlpatrol.world import DATA, load_world  # noqa: E402
 
@@ -38,16 +43,6 @@ BUDGET_PREFS = [[1, 0, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1], [1 / 3, 0, 1 / 3, 1 / 
 SCALE = F_SCALE.numpy()
 
 
-def pref_set(K, seed=0):
-    """corners, edge midpoints, centroid, then Dirichlet(1) samples: K preferences on the 4-simplex."""
-    E = np.eye(4)
-    P = [*E, *[(E[i] + E[j]) / 2 for i in range(4) for j in range(i + 1, 4)], np.full(4, 0.25)]
-    rng = np.random.default_rng(seed)
-    while len(P) < K:
-        P.append(rng.dirichlet(np.ones(4)))
-    return np.array(P[:K])
-
-
 def conditions(budget, K):
     """(prefs [C, 4], budgets [C] or None)."""
     if budget:
@@ -56,7 +51,7 @@ def conditions(budget, K):
     return pref_set(K), None
 
 
-def rl_solve(actor, world, legs_m, prefs, budgets, S, seed=0):
+def rl_solve(actor, world, legs_m, prefs, budgets, S, seed=0, budget_obs=False):
     """all legs at once: per leg (F [m, 4], enc [m, 3, n]) of all rollouts (actor None: zero action),
     and the wall time."""
     torch.manual_seed(seed)
@@ -66,7 +61,7 @@ def rl_solve(actor, world, legs_m, prefs, budgets, S, seed=0):
     bu = None if budgets is None else torch.tensor(np.tile(np.tile(budgets, rep), nL))
     det = torch.tensor(([True] * C + [False] * C * S) * nL)
     t0 = time.perf_counter()
-    env = PathEnv(world, world.to_units(Lr[:, :3]), world.to_units(Lr[:, 3:]), pr, budget=bu)
+    env = PathEnv(world, world.to_units(Lr[:, :3]), world.to_units(Lr[:, 3:]), pr, budget=bu, budget_obs=budget_obs)
     enc = []
     for _ in range(N_NODES):
         with torch.no_grad():
@@ -144,16 +139,24 @@ def main():
     ap.add_argument("--S", type=int, default=3)
     ap.add_argument("--refine", action="store_true")
     ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--tag", default=None, help="output tag (default <ckpt stem>_<legs>[_ls])")
+    ap.add_argument("--overwrite", action="store_true", help="replace existing results/eval_<tag>.json")
     a = ap.parse_args()
+    tag = a.tag or f"{Path(a.ckpt).stem}_{a.legs}" + ("_ls" if a.refine else "")
+    outs = [ROOT / "results" / f"eval_{tag}.json", ROOT / "results" / f"rl_solutions_{tag}.mat"]
+    if any(o.exists() for o in outs) and not a.overwrite:
+        sys.exit(f"{[str(o) for o in outs if o.exists()]} exist; pass --tag NAME or --overwrite")
     torch.set_num_threads(a.threads)
     world = load_world()
     legs_m = loadmat(DATA / f"legs_{a.legs}.mat")["legs"]
-    ck = torch.load(a.ckpt, weights_only=False)
+    ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
     budget = ck["cfg"].get("budget", False)
-    actor = Actor(ck["cfg"]["hidden"], ctx=5 if budget else 4); actor.load_state_dict(ck["actor"]); actor.eval()
+    bobs = ck["cfg"].get("budget_obs", False)
+    ctx, extra = net_shape(ck["cfg"])
+    actor = Actor(ck["cfg"]["hidden"], ctx=ctx, extra=extra); actor.load_state_dict(ck["actor"]); actor.eval()
     prefs, budgets = conditions(budget, a.K)
-    sols, wall = rl_solve(actor, world, legs_m, prefs, budgets, a.S)
-    t0 = time.perf_counter(); rl_solve(actor, world, legs_m[:1], prefs, budgets, a.S); lat = time.perf_counter() - t0
+    sols, wall = rl_solve(actor, world, legs_m, prefs, budgets, a.S, budget_obs=bobs)
+    t0 = time.perf_counter(); rl_solve(actor, world, legs_m[:1], prefs, budgets, a.S, budget_obs=bobs); lat = time.perf_counter() - t0
     straight, _ = rl_solve(None, world, legs_m, prefs[:1], None if budgets is None else budgets[:1], 0)
     sols = [(np.vstack([F, straight[k][0]]), np.concatenate([e, straight[k][1]])) for k, (F, e) in enumerate(sols)]
     n_rl = len(sols[0][0])
@@ -219,7 +222,6 @@ def main():
             cmp[f"{m}_eps_to_nmopso_pick_median"] = float(np.median(e))
         summ["compared"] = cmp
     res = dict(ckpt=a.ckpt, legs=a.legs, summary=summ, rows=rows)
-    tag = f"{Path(a.ckpt).stem}_{a.legs}" + ("_ls" if ls else "")
     (ROOT / "results" / f"eval_{tag}.json").write_text(json.dumps(res, indent=1))
     src = ls if ls else sols
     enc = np.concatenate([e for _, e in src]); legi = np.concatenate([np.full(len(e), k + 1) for k, (_, e) in enumerate(src)])
