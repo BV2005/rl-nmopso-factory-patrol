@@ -2,7 +2,11 @@
 __pycache__/
 *.pyc
 .claude/
-# ray-distance table cache (rebuilt automatically, ~13 MB)
+# ray-distance and route table caches (rebuilt automatically, ~13 MB and ~45 MB)
 data/raytable_*.pt
+data/route_*.pt
 # Gazebo run folders (copied to results/flights when kept)
 gazebo/nmopso_demo/run_logs/
+# training snapshots (results/ckpt/<run>_itNNNN.pt) and training queue outputs
+results/ckpt/*_it[0-9][0-9][0-9][0-9].pt
+results/runs/*_runner.out
