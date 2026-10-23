@@ -18,6 +18,23 @@ Reward: a preference w on the 4-simplex is drawn per episode and observed by the
   optional  potential-based shaping (shape > 0): Phi = -shape * |q - goal| / PP, Phi = 0 at the end.
   optional  straight prior (act_pen > 0): -act_pen * |a|^2 every step, so the policy leaves the
             straight level path only where it pays; a training regulariser, never part of the score.
+  optional  dense threat (dense): J2 is a mean over segments, so each step is paid -w2 * (its new
+            segment's share of J2) / F_SCALE[1], plus the growth of the budget overshoot; the terminal
+            reward is the usual one minus what was already paid, so every path's return is unchanged.
+            What is paid early is the capped cost of the segments so far (cap(.) of their threat and
+            budget terms), so that remainder is never positive (a capped cost or a collision would
+            otherwise refund it and credit the later steps).
+  optional  soft cap (soft_cap, round C): the scaled cost of a feasible path is capped by
+            S_MAX * tanh(s / SOFT_SCALE) instead of min(s, S_MAX). Still below S_MAX (any feasible path
+            beats any infeasible one) and monotone, but never flat: a path far over its threat budget
+            still gains from lowering its threat.
+Observation option (budget_obs, with budget conditioning): BUDGET_OBS entries before u, in
+F_SCALE[1] units: the budget left (u * straight F2 - threat of the segments so far) and the threat
+of flying straight from the current point to the goal over the remaining segments.
+Observation option (route_obs, round B): ROUTE_OBS entries before the budget state, from the
+precomputed shortest collision-free routes (rlpatrol/route.py): cos and sin of the route waypoint's
+bearing relative to the goal bearing (1, 0 whenever the goal is visible), the route length left over
+the reach left (segments left x VarMax.r; > 1: the goal is out of reach), and over the straight distance.
 """
 import hashlib
 import math
@@ -26,17 +43,22 @@ import numpy as np
 import torch
 
 from .world import DATA
-from .nmopso_cost import ANGLE, DRONE, N_NODES, Legs, tmat
+from .nmopso_cost import ANGLE, DANGER, DRONE, N_NODES, Legs, tmat
+from .route import route_features
 
 N_RAYS = 16
 RAY_MAX = 40.0                         # units (4 m)
 F_SCALE = torch.tensor([0.5, 0.02, 1.0, 0.2])   # p95 of NMOPSO's fronts on the factory2_auto plan (scripts/front_stats.py)
 S_MAX = 5.0                                      # scaled cost of a feasible path is capped here
 INFEASIBLE = S_MAX + 1.0                         # so any feasible path beats any infeasible one
+SOFT_SCALE = 4 * S_MAX                           # soft cap: S_MAX * tanh(s / SOFT_SCALE), slope 1/4 at 0
 SIG_R = 1.0                                      # a_r = +-1: step length x e^+-1
 YAW_MAX = math.pi / 2                            # a_yaw = +-1: +-90 deg from the goal bearing
 OBS_DIM = 3 + 1 + 1 + 3 + 1 + 1 + 1 + 2 + N_RAYS + 4      # + 1 (threat budget u) when budget conditioning is on
 BUDGET_PEN = 5.0                                 # per F_SCALE[1] of threat above the budget
+BUDGET_OBS = 2                                   # extra observation entries with budget_obs
+ROUTE_OBS = 4                                    # extra observation entries with route_obs
+N_SEGS = N_NODES + 1                             # start -> node 1 -> ... -> node n -> goal
 
 
 RAY_DIRS = 64
@@ -46,17 +68,18 @@ _RAY_TABLES = {}
 def ray_table(world):
     """[ny, nx, RAY_DIRS] float32: from every unit cell centre (x, y = 0 .. mapsize), the distance along
     each global direction to the first drone-inflated cylinder or the map bounds, / RAY_MAX, capped at 1."""
-    key = id(world)
+    dev = world.threats.device
+    key = (id(world), str(dev))
     if key in _RAY_TABLES:
         return _RAY_TABLES[key]
-    sig = hashlib.sha1(world.threats.numpy().tobytes() + np.asarray(world.bounds).tobytes()
+    th = world.threats.detach().cpu()
+    sig = hashlib.sha1(th.numpy().tobytes() + np.asarray(world.bounds).tobytes()
                        + f"{RAY_DIRS} {RAY_MAX} {DRONE}".encode()).hexdigest()[:12]
     cache = DATA / f"raytable_{sig}.pt"
     if cache.exists():
-        _RAY_TABLES[key] = torch.load(cache)
+        _RAY_TABLES[key] = torch.load(cache, map_location="cpu").to(dev)
         return _RAY_TABLES[key]
     nx, ny = int(world.bounds[1]) + 2, int(world.bounds[3]) + 2
-    th = world.threats
     ang = torch.arange(RAY_DIRS, dtype=th.dtype) * (2 * math.pi / RAY_DIRS)
     d = torch.stack([torch.cos(ang), torch.sin(ang)], -1)                     # [K, 2]
     lo = torch.as_tensor(world.bounds[[0, 2]], dtype=th.dtype)
@@ -80,15 +103,15 @@ def ray_table(world):
         out.append((hit / RAY_MAX).clamp(max=1.0).float())
     tab = torch.cat(out).reshape(ny, nx, RAY_DIRS)
     torch.save(tab, cache)
-    _RAY_TABLES[key] = tab
-    return tab
+    _RAY_TABLES[key] = tab.to(dev)
+    return _RAY_TABLES[key]
 
 
 def direct_rays(world, q, yaw):
     """exact ray casting from q [B, 3] along N_RAYS directions relative to yaw [B] (the geometry of
     ray_table, without its grid and direction rounding), / RAY_MAX capped at 1."""
     th = world.threats
-    ang = yaw[:, None] + torch.arange(N_RAYS, dtype=th.dtype) * (2 * math.pi / N_RAYS)
+    ang = yaw[:, None] + torch.arange(N_RAYS, dtype=th.dtype, device=th.device) * (2 * math.pi / N_RAYS)
     d = torch.stack([torch.cos(ang), torch.sin(ang)], -1)                     # [B, K, 2]
     o = q[:, None, None, :2] - th[None, None, :, :2]                          # [B, 1, M, 2]
     R = th[:, 3] + DRONE
@@ -99,7 +122,8 @@ def direct_rays(world, q, yaw):
     t = torch.where((disc >= 0) & (t >= 0), t, torch.full_like(t, math.inf))
     t = torch.where(cq < 0, torch.zeros_like(t), t)
     hit = t.min(-1).values
-    lo = torch.as_tensor(world.bounds[[0, 2]], dtype=th.dtype); hi = torch.as_tensor(world.bounds[[1, 3]], dtype=th.dtype)
+    lo = torch.as_tensor(world.bounds[[0, 2]], dtype=th.dtype, device=th.device)
+    hi = torch.as_tensor(world.bounds[[1, 3]], dtype=th.dtype, device=th.device)
     qq = q[:, None, :2]
     tb = torch.where(d > 0, (hi - qq) / d.clamp_min(1e-9), torch.where(d < 0, (lo - qq) / d.clamp_max(-1e-9), torch.full_like(d, math.inf)))
     hit = torch.minimum(hit, tb.min(-1).values.clamp_min(0))
@@ -114,28 +138,51 @@ def sample_pref(B, gen=None, dtype=torch.float64):
 
 
 
+def seg_threat(world, P):
+    """each segment's share of MyCost.m's soft J2: points P [B, K, 3] -> [B, K-1], summing to J2 when
+    P is the whole path (start, n nodes, goal); same formula as Legs.cost (horizontal distance)."""
+    th = world.threats
+    a, e = P[:, :-1, None, :2], (P[:, 1:] - P[:, :-1])[:, :, None, :2]
+    c = th[None, None, :, :2]
+    ee = (e * e).sum(-1)
+    t = torch.where(ee > 0, ((c - a) * e).sum(-1) / ee.clamp_min(1e-300), torch.zeros_like(ee)).clamp(0, 1)
+    dist = (a + t[..., None] * e - c).norm(dim=-1)
+    tc = (1 - (dist - DRONE - th[:, 3]) / DANGER).clamp(0, 1)
+    return tc.sum(-1) / (N_SEGS * len(th))
+
+
 class PathEnv:
-    def __init__(self, world, start, goal, pref, shape=0.0, scalar="linear", act_pen=0.0, budget=None, budget_pen=BUDGET_PEN):
+    def __init__(self, world, start, goal, pref, shape=0.0, scalar="linear", act_pen=0.0, budget=None, budget_pen=BUDGET_PEN,
+                 dense=False, budget_obs=False, route_obs=False, soft_cap=False):
         """budget: None, or u [B] - threat-budget conditioning: the path should keep F2 <= u * F2 of
-        the straight (zero-action) path (its F2 without the collision infinity); u is observed."""
+        the straight (zero-action) path (its F2 without the collision infinity); u is observed.
+        dense, budget_obs, route_obs, soft_cap: see the module doc."""
+        if budget_obs and budget is None:
+            raise ValueError("budget_obs needs budget conditioning")
+        if dense and scalar != "linear":
+            raise ValueError("dense threat needs the linear scalarisation (a max does not split by segment)")
         self.legs = Legs(world, start, goal)
         self.w = world
-        self.pref = pref.to(self.legs.dist.dtype)
+        self.pref = pref.to(self.legs.dist)                               # dtype and device of the world
         self.shape, self.scalar, self.act_pen, self.budget_pen = shape, scalar, act_pen, budget_pen
-        B, dt = len(self.legs), self.legs.dist.dtype
-        self.T = torch.eye(4, dtype=dt).repeat(B, 1, 1)                      # chain since startPosition
+        B, dt, dev = len(self.legs), self.legs.dist.dtype, self.legs.dist.device
+        self.T = torch.eye(4, dtype=dt, device=dev).repeat(B, 1, 1)          # chain since startPosition
         self.q = self.legs.start.clone()                                    # last path point (clamped)
-        self.nodes = torch.zeros(B, N_NODES, 3, dtype=dt)
+        self.nodes = torch.zeros(B, N_NODES, 3, dtype=dt, device=dev)
         self.i = 0
+        self.dense, self.budget_obs, self.route_obs, self.soft_cap = dense, budget_obs, route_obs, soft_cap
+        self.prev = self.legs.start.clone()                                 # start of the next segment
+        self.c = torch.zeros(B, dtype=dt, device=dev)                       # J2 share of the segments so far
+        self.paid = torch.zeros(B, dtype=dt, device=dev)                    # dense rewards paid so far
         self.zmid = (self.legs.lo[2] + self.legs.hi[2]) / 2
         self.zhalf = (self.legs.hi[2] - self.legs.lo[2]) / 2
         self.u = None
         if budget is not None:
             ref = PathEnv(world, start, goal, pref)
             for _ in range(N_NODES):
-                ref.step(torch.zeros(B, 3))
+                ref.step(torch.zeros(B, 3, device=dev))
             self.f2_straight = ref.legs.cost(ref.nodes, details=True)[2]
-            self.u = torch.as_tensor(budget, dtype=dt)
+            self.u = torch.as_tensor(budget, dtype=dt, device=dev)
             self.eps = self.u * self.f2_straight
 
     def pose(self):
@@ -153,7 +200,7 @@ class PathEnv:
         tab = ray_table(self.w)
         ix = q[:, 0].round().long().clamp(0, tab.shape[1] - 1)
         iy = q[:, 1].round().long().clamp(0, tab.shape[0] - 1)
-        k = torch.arange(N_RAYS) * (RAY_DIRS // N_RAYS)
+        k = torch.arange(N_RAYS, device=q.device) * (RAY_DIRS // N_RAYS)
         dk = (yaw / (2 * math.pi / RAY_DIRS)).round().long()
         return tab[iy[:, None], ix[:, None], (k[None] + dk[:, None]) % RAY_DIRS]
 
@@ -174,12 +221,35 @@ class PathEnv:
         head = torch.atan2(R[:, 1, 0], R[:, 0, 0]) - bear                   # chain heading vs goal bearing
         o = torch.cat([g, reach, zc, off, left, D / 100, self.legs.rmax[:, None] / RAY_MAX,
                        torch.cos(head)[:, None], torch.sin(head)[:, None],
-                       self.rays(self.q, bear)] + ([self.u[:, None]] if self.u is not None else []) + [self.pref], -1)
+                       self.rays(self.q, bear)] + self.route_state(bear) + self.budget_state()
+                      + ([self.u[:, None]] if self.u is not None else [])
+                      + [self.pref], -1)
         return o.float()
+
+    def route_state(self, bear):
+        """[] or [cos, sin of the waypoint bearing - goal bearing, route left / reach left, route left / straight]."""
+        if not self.route_obs:
+            return []
+        wp, L = route_features(self.w, self.q[:, :2], self.legs.goal[:, :2])
+        rel = torch.atan2(wp[:, 1] - self.q[:, 1], wp[:, 0] - self.q[:, 0]) - bear
+        straight = (self.legs.goal[:, :2] - self.q[:, :2]).norm(dim=-1)
+        reach = (L / (self.segs_left() * self.legs.rmax)).nan_to_num(3.0).clamp(0, 3)
+        detour = (L / straight.clamp_min(1e-6)).nan_to_num(4.0).clamp(1, 4) - 1
+        return [torch.cos(rel)[:, None], torch.sin(rel)[:, None], reach[:, None], detour[:, None]]
+
+    def budget_state(self):
+        """[] or [budget left, straight threat to go] ([B, 1] each, F_SCALE[1] units, clamped to +-5)."""
+        if not self.budget_obs:
+            return []
+        n = self.segs_left()
+        t = torch.linspace(0, 1, n + 1, dtype=self.q.dtype, device=self.q.device)[None, :, None]
+        togo = seg_threat(self.w, self.q[:, None] + t * (self.legs.goal - self.q)[:, None]).sum(-1)
+        f2 = F_SCALE[1].item()
+        return [((self.eps - self.c) / f2).clamp(-5, 5)[:, None], (togo / f2).clamp(-5, 5)[:, None]]
 
     def act(self, a):
         """residual a [B, 3] in [-1, 1] -> (r, psi, phi) in NMOPSO's bounds (see module doc)."""
-        a = a.to(self.T.dtype).clamp(-1, 1)
+        a = a.to(self.T).clamp(-1, 1)
         P = self.pose()
         R, p = P[:, :3, :3], P[:, :3, 3]
         gv = self.legs.goal - p
@@ -195,28 +265,42 @@ class PathEnv:
         return r, psi, phi
 
     def scalarise(self, F):
-        Fs = F / F_SCALE.to(F.dtype)
+        Fs = F / F_SCALE.to(F)
         if self.scalar == "tcheby":                                         # augmented Tchebycheff
             return (self.pref * Fs).max(-1).values + 0.05 * (self.pref * Fs).sum(-1)
         return (self.pref * Fs).sum(-1)
 
+    def cap(self, s):
+        """the capped scaled cost of a feasible path: min(s, S_MAX), or the soft cap."""
+        return S_MAX * torch.tanh(s / SOFT_SCALE) if self.soft_cap else s.clamp(max=S_MAX)
+
     def step(self, a):
         phi0 = self.potential()
-        pen = (self.act_pen * a.to(self.T.dtype).pow(2).sum(-1)).float()   # straight prior (training only)
+        pen = (self.act_pen * a.to(self.T).pow(2).sum(-1)).float()   # straight prior (training only)
         r, psi, phi = self.act(a)
         self.T = self.T @ tmat(r, phi, psi)
         self.q = self.legs.clamp(self.pose()[:, :3, 3])
         self.nodes[:, self.i] = self.q
         self.i += 1
+        self.c = self.c + seg_threat(self.w, torch.stack([self.prev, self.q], 1))[:, 0]
+        self.prev = self.q
         done = self.i == N_NODES
         if not done:
-            return (self.potential() - phi0).float() - pen, False, None
+            d = torch.zeros_like(self.c)
+            if self.dense:                                                  # this segment's threat, as it is flown:
+                part = self.pref[:, 1] * self.c / F_SCALE[1].item()         # the threat and budget terms of the
+                if self.u is not None:                                      # segments so far, capped as the
+                    part = part + self.budget_pen * (self.c - self.eps).clamp_min(0) / F_SCALE[1].item()
+                d = -self.cap(part) - self.paid                             # whole cost is (the terminal
+                self.paid = self.paid + d                                   # remainder is never a refund)
+            return (self.potential() - phi0 + d).float() - pen, False, None
         F, viol, _ = self.legs.cost(self.nodes, details=True)
         feas = torch.isfinite(F).all(-1)
         Ff = F.nan_to_num(posinf=1e6)
         s = self.scalarise(Ff)
         if self.u is not None:                                              # F2 is a budget, not a weight
             s = s + self.budget_pen * (Ff[:, 1] - self.eps).clamp_min(0) / F_SCALE[1].item()
-        s = s.clamp(max=S_MAX)
+        s = self.cap(s)
         rew = torch.where(feas, -s, -(INFEASIBLE + viol.clamp(max=3.0))) - phi0   # Phi(terminal) = 0
+        rew = rew - self.paid                                               # dense: the return is unchanged
         return rew.float() - pen, True, {"F": F, "feasible": feas}
