@@ -14,7 +14,7 @@ from scipy.io import loadmat, savemat
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
-from evaluate import conditions, rl_solve  # noqa: E402
+from evaluate import conditions, rl_solve, sensor_kw  # noqa: E402
 from rlpatrol.ppo import Actor, net_shape  # noqa: E402
 from rlpatrol.world import DATA, load_world  # noqa: E402
 
@@ -51,7 +51,7 @@ if __name__ == "__main__":
     prefs, budgets = conditions(budget, 50)
     t0 = time.perf_counter()
     sols, _ = rl_solve(actor, world, legs_m, prefs, budgets, a.S, budget_obs=ck["cfg"].get("budget_obs", False),
-                       route_obs=ck["cfg"].get("route_obs", False))
+                       route_obs=ck["cfg"].get("route_obs", False), **sensor_kw(ck["cfg"]))
     straight, _ = rl_solve(None, world, legs_m, prefs[:1], None if budgets is None else budgets[:1], 0)
     K, n = len(legs_m), sols[0][1].shape[-1]
     R = np.zeros((K, a.M, n)); PS = np.zeros((K, a.M, n)); PH = np.zeros((K, a.M, n)); cnt = np.zeros(K)

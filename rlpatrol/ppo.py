@@ -12,7 +12,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .env import BUDGET_OBS, N_NODES, OBS_DIM, ROUTE_OBS, PathEnv, sample_pref
+from .env import BUDGET_OBS, N_NODES, N_RAYS, OBS_DIM, ROUTE_OBS, SENSOR_OBS, PathEnv, sample_pref
+from .sensors import SensorSpec
 from .legs import random_legs
 
 
@@ -46,6 +47,9 @@ class Config:
     budget_obs: bool = False        # observe the budget left and the straight path's threat to go (needs budget)
     route_obs: bool = False         # observe the shortest collision-free route (waypoint bearing, length left)
     soft_cap: bool = False          # cap the scaled cost by S_MAX * tanh(s / SOFT_SCALE), never flat (round C)
+    sensor_obs: bool = False        # the actor sees the x500_patrol lidar + depth scan instead of oracle geometry
+    priv_critic: bool = False       # asymmetric actor-critic: the critic also sees the oracle features (needs sensor_obs)
+    sensor_noise: bool = True       # sensor_obs: simulate sensor noise, dropout and pose error (domain randomisation)
     seed: int = 1
     threads: int = 0                # 0: torch default
     device: str = "cpu"             # cpu | cuda | auto (cuda if available)
@@ -116,12 +120,46 @@ class Actor(nn.Module):
         return (d.log_prob(u) - 2 * (math.log(2) - u - nn.functional.softplus(-2 * u))).sum(-1)
 
 
+def _getter(cfg):
+    return cfg.get if isinstance(cfg, dict) else lambda k, d=None: getattr(cfg, k, d)
+
+
 def net_shape(cfg):
     """(ctx, extra) of a Config or a checkpoint's cfg dict: conditioning entries (preference, + u with
-    budget conditioning) and extra observation entries (budget_obs, route_obs)."""
-    get = cfg.get if isinstance(cfg, dict) else lambda k, d=None: getattr(cfg, k, d)
+    budget conditioning) and extra observation entries of the actor (budget_obs, route_obs, sensor_obs)."""
+    get = _getter(cfg)
     return ((5 if get("budget", False) else 4),
-            (BUDGET_OBS if get("budget_obs", False) else 0) + (ROUTE_OBS if get("route_obs", False) else 0))
+            (BUDGET_OBS if get("budget_obs", False) else 0) + (ROUTE_OBS if get("route_obs", False) else 0)
+            + (SENSOR_OBS if get("sensor_obs", False) else 0))
+
+
+def critic_extra(cfg):
+    """extra observation entries of the critic: the actor's, plus with priv_critic the privileged
+    oracle features of PathEnv.obs_pair (exact rays, route features, budget state with budget)."""
+    get = _getter(cfg)
+    _, extra = net_shape(cfg)
+    if get("priv_critic", False):
+        extra += N_RAYS + ROUTE_OBS + (BUDGET_OBS if get("budget", False) else 0)
+    return extra
+
+
+def env_kwargs(cfg, noise=None, critic=True):
+    """the PathEnv observation options of a Config or a checkpoint's cfg dict. noise overrides
+    sensor_noise (e.g. False: ideal sensors at evaluation); critic=False leaves out the privileged
+    critic observation (inference needs the actor's only)."""
+    get = _getter(cfg)
+    noise = get("sensor_noise", True) if noise is None else noise
+    return dict(budget_obs=get("budget_obs", False), route_obs=get("route_obs", False),
+                sensor_obs=get("sensor_obs", False), priv=bool(critic and get("priv_critic", False)),
+                sensor_spec=SensorSpec(noise=bool(noise)))
+
+
+def check_config(cfg):
+    if cfg.sensor_obs and (cfg.route_obs or cfg.budget_obs):
+        raise ValueError("sensor_obs: route_obs / budget_obs are oracle features; use priv_critic to give them "
+                         "to the critic only")
+    if cfg.priv_critic and not cfg.sensor_obs:
+        raise ValueError("priv_critic needs sensor_obs")
 
 
 def training_legs(world, n, rng, cfg):
@@ -140,30 +178,37 @@ def sample_budget_pref(B, cfg, gen=None):
 
 
 def rollout(actor, world, legs_m, pref, deterministic=False, shape=0.0, scalar="linear", act_pen=0.0, budget=None,
-            budget_pen=5.0, dense=False, budget_obs=False, route_obs=False, soft_cap=False):
+            budget_pen=5.0, dense=False, budget_obs=False, route_obs=False, soft_cap=False, sensor_obs=False,
+            priv=False, sensor_spec=None):
+    """one batch of episodes -> (O, U, LP, R [B, T, ...], terminal info, env); the critic's
+    observations [B, T, ...] are env.OC (the same tensor as O unless priv)."""
     env = PathEnv(world, world.to_units(legs_m[:, :3]), world.to_units(legs_m[:, 3:]), pref, shape, scalar, act_pen, budget,
-                  budget_pen, dense, budget_obs, route_obs, soft_cap)
-    O, U, LP, R = [], [], [], []
+                  budget_pen, dense, budget_obs, route_obs, soft_cap, sensor_obs=sensor_obs, priv=priv,
+                  sensor_spec=sensor_spec)
+    O, OC, U, LP, R = [], [], [], [], []
     info = None
     for _ in range(N_NODES):
-        o = env.obs()
+        o, oc = env.obs_pair()
         with torch.no_grad():
             a, u, lp = actor.act(o, deterministic)
         r, done, info = env.step(a)
-        O.append(o); U.append(u); LP.append(lp); R.append(r)
-    return torch.stack(O, 1), torch.stack(U, 1), torch.stack(LP, 1), torch.stack(R, 1), info, env
+        O.append(o); OC.append(oc); U.append(u); LP.append(lp); R.append(r)
+    O = torch.stack(O, 1)
+    env.OC = torch.stack(OC, 1) if priv else O
+    return O, torch.stack(U, 1), torch.stack(LP, 1), torch.stack(R, 1), info, env
 
 
 def det_probe(actor, world, legs, cfg):
     """deterministic paths on fixed legs: random preferences, and the four corner preferences."""
     n = len(legs)
     g = torch.Generator().manual_seed(5)
+    kw = env_kwargs(cfg)
+    kw_nb = {**kw, "budget_obs": False}                 # the rollouts without budget conditioning
     if cfg.budget:
         w, u = sample_budget_pref(n, cfg, g)
-        _, _, _, _, info, _ = rollout(actor, world, legs, w, True, budget=u, budget_obs=cfg.budget_obs,
-                                      route_obs=cfg.route_obs)
+        _, _, _, _, info, _ = rollout(actor, world, legs, w, True, budget=u, **kw)
     else:
-        _, _, _, _, info, _ = rollout(actor, world, legs, sample_pref(n, g), True, route_obs=cfg.route_obs)
+        _, _, _, _, info, _ = rollout(actor, world, legs, sample_pref(n, g), True, **kw_nb)
     feas = info["feasible"]; F = info["F"][feas]
     out = {"det_feasible": feas.float().mean().item(), "det_F": F.mean(0).tolist() if len(F) else [math.nan] * 4}
     if cfg.budget:                       # F2 / straight F2 achieved for a tight and a loose budget
@@ -171,14 +216,14 @@ def det_probe(actor, world, legs, cfg):
         out["budget_F2_ratio"] = []
         for uu in (0.3, 1.0):
             _, _, _, _, info, env = rollout(actor, world, legs, w, True, budget=torch.full((n,), uu, dtype=torch.float64),
-                                            budget_obs=cfg.budget_obs, route_obs=cfg.route_obs)
+                                            **kw)
             ok = info["feasible"] & (env.f2_straight > 0)
             out["budget_F2_ratio"].append((info["F"][ok, 1] / env.f2_straight[ok]).median().item() if ok.any() else math.nan)
         return out
     corner = []
     for j in range(4):
         w = torch.zeros(n, 4, dtype=torch.float64); w[:, j] = 1
-        _, _, _, _, info, _ = rollout(actor, world, legs, w, True, route_obs=cfg.route_obs)
+        _, _, _, _, info, _ = rollout(actor, world, legs, w, True, **kw_nb)
         Fj = info["F"][info["feasible"]]
         corner.append(Fj[:, j].mean().item() if len(Fj) else math.nan)
     out["corner_Fj"] = corner          # F_j under w = e_j (should be the lowest F_j of any preference)
@@ -222,6 +267,7 @@ def train(world, cfg: Config, log=print, ckpt=None, resume=None, metrics=None, s
     metrics   path of a JSONL file; one row per iteration is appended
     snapshot  format string with {it}, e.g. 'results/ckpt/v5_it{it:04d}.pt' (cfg.snapshot_every)
     The world must already be on cfg's device (load_world(device=...))."""
+    check_config(cfg)
     dev = resolve_device(cfg.device)
     if world.threats.device != dev:
         raise ValueError(f"world is on {world.threats.device}, cfg.device resolves to {dev}")
@@ -231,7 +277,8 @@ def train(world, cfg: Config, log=print, ckpt=None, resume=None, metrics=None, s
     rng = np.random.default_rng(cfg.seed + 777)       # test legs use seed 12345
     probe_legs = training_legs(world, 1024, np.random.default_rng(999), cfg)
     ctx, extra = net_shape(cfg)
-    actor, crit = Actor(cfg.hidden, cfg.log_std0, ctx, extra).to(dev), PrefMLP(cfg.hidden, 1, ctx, extra).to(dev)
+    actor = Actor(cfg.hidden, cfg.log_std0, ctx, extra).to(dev)
+    crit = PrefMLP(cfg.hidden, 1, ctx, critic_extra(cfg)).to(dev)
     opt_a = torch.optim.Adam(actor.parameters(), lr=cfg.lr)
     opt_v = torch.optim.Adam(crit.parameters(), lr=cfg.lr_v)
     ret_scale = None
@@ -268,11 +315,11 @@ def train(world, cfg: Config, log=print, ckpt=None, resume=None, metrics=None, s
             pref, bud = sample_budget_pref(cfg.batch, cfg)
         else:
             pref, bud = sample_pref(cfg.batch), None
-        O, U, LP, R, info, _ = rollout(actor, world, legs, pref, shape=cfg.shape, scalar=cfg.scalar,
-                                       act_pen=cfg.act_pen, budget=bud, budget_pen=cfg.budget_pen,
-                                       dense=cfg.dense, budget_obs=cfg.budget_obs, route_obs=cfg.route_obs,
-                                       soft_cap=cfg.soft_cap)
-        if not _finite(O, U, LP, R):
+        O, U, LP, R, info, renv = rollout(actor, world, legs, pref, shape=cfg.shape, scalar=cfg.scalar,
+                                          act_pen=cfg.act_pen, budget=bud, budget_pen=cfg.budget_pen,
+                                          dense=cfg.dense, soft_cap=cfg.soft_cap, **env_kwargs(cfg))
+        OC = renv.OC
+        if not _finite(O, OC, U, LP, R):
             bad += 1
             log(f"it {it:4d}  non-finite observation/action/reward in the rollout: update skipped ({bad} in a row)")
             if bad >= cfg.max_bad_iters:
@@ -284,7 +331,7 @@ def train(world, cfg: Config, log=print, ckpt=None, resume=None, metrics=None, s
         ret_scale = s if ret_scale is None else 0.95 * ret_scale + 0.05 * s
         Rn = R / ret_scale
         with torch.no_grad():
-            V = crit(O.reshape(B * T, -1)).reshape(B, T)
+            V = crit(OC.reshape(B * T, -1)).reshape(B, T)
         adv = torch.zeros_like(Rn); last = torch.zeros(B, device=dev)
         for t in reversed(range(T)):
             nv = V[:, t + 1] if t + 1 < T else torch.zeros(B, device=dev)
@@ -292,7 +339,7 @@ def train(world, cfg: Config, log=print, ckpt=None, resume=None, metrics=None, s
             last = delta + cfg.gamma * cfg.lam * last
             adv[:, t] = last
         ret = adv + V
-        o, u, lp, ad, rt = (x.reshape(B * T, *x.shape[2:]) for x in (O, U, LP, adv, ret))
+        o, oc, u, lp, ad, rt = (x.reshape(B * T, *x.shape[2:]) for x in (O, OC, U, LP, adv, ret))
         ad = (ad - ad.mean()) / (ad.std() + 1e-8)
         snap_a = {k: v.clone() for k, v in actor.state_dict().items()}
         snap_v = {k: v.clone() for k, v in crit.state_dict().items()}
@@ -308,7 +355,7 @@ def train(world, cfg: Config, log=print, ckpt=None, resume=None, metrics=None, s
                 pl = -torch.min(ratio * ad[idx], ratio.clamp(1 - cfg.clip, 1 + cfg.clip) * ad[idx]).mean()
                 ent = d.entropy().sum(-1).mean()
                 loss = pl - cfg.ent * ent
-                vl = (crit(o[idx]).squeeze(-1) - rt[idx]).pow(2).mean()
+                vl = (crit(oc[idx]).squeeze(-1) - rt[idx]).pow(2).mean()
                 if not _finite(loss, vl):
                     skipped += 1
                     continue

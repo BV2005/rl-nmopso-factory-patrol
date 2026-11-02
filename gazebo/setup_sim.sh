@@ -6,6 +6,7 @@
 #   bash gazebo/setup_sim.sh
 # Environment overrides: PX4_DIR (default ~/PX4-Autopilot), PX4_ROS_WS (default ~/px4_ros_ws).
 set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # before the cd's below
 PX4_COMMIT=cda3c3603f          # v1.18.0-beta1-334 (tested)
 PX4_MSGS_COMMIT=ed9ddee        # PX4/px4_msgs (tested)
 XRCE_TAG=v2.4.3
@@ -51,4 +52,7 @@ set +u; source /opt/ros/jazzy/setup.bash; set -u
 (cd "$WS" && colcon build --packages-select px4_msgs)
 
 python3 -m pip install --user --break-system-packages pymavlink==2.4.49 numpy
+
+# the x500_patrol sensor drone (gazebo/models/x500_patrol) and what sensor_follower.py needs
+PX4_DIR="$PX4_DIR" bash "$HERE/install_patrol_drone.sh"
 echo "done: PX4_DIR=$PX4_DIR, PX4_MSGS_WS=$WS/install"
