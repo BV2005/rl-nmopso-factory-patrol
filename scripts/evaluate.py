@@ -32,7 +32,7 @@ from rlpatrol.env import F_SCALE, PathEnv  # noqa: E402
 from rlpatrol.metrics import add_eps, hypervolume, igd_plus, nondominated, short_safe  # noqa: E402
 from rlpatrol.nmopso_cost import ANGLE, N_NODES, Legs  # noqa: E402
 from rlpatrol.planner import BUDGET_PREFS, U_SWEEP, conditions, pref_set  # noqa: E402,F401  (shared with the online planner)
-from rlpatrol.ppo import Actor, env_kwargs, net_shape  # noqa: E402
+from rlpatrol.ppo import env_kwargs, make_actor  # noqa: E402
 from rlpatrol.refine import WEIGHTS, cem  # noqa: E402
 from rlpatrol.world import DATA, load_world  # noqa: E402
 
@@ -54,10 +54,14 @@ def rl_solve(actor, world, legs_m, prefs, budgets, S, seed=0, budget_obs=False, 
     env = PathEnv(world, world.to_units(Lr[:, :3]), world.to_units(Lr[:, 3:]), pr, budget=bu, budget_obs=budget_obs,
                   route_obs=route_obs, **obs_kw)
     enc = []
+    if actor:
+        actor.reset(len(Lr))
     for _ in range(N_NODES):
         with torch.no_grad():
             o = env.obs()
             a = torch.where(det[:, None], actor.act(o, True)[0], actor.act(o)[0]) if actor else torch.zeros(len(Lr), 3)
+            if actor:
+                actor.commit()
         enc.append(torch.stack(env.act(a), -1))                    # r, psi, phi
         env.step(a)
     F = env.legs.cost(env.nodes).numpy()
@@ -151,8 +155,7 @@ def main():
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
     budget = ck["cfg"].get("budget", False)
     bobs, robs = ck["cfg"].get("budget_obs", False), ck["cfg"].get("route_obs", False)
-    ctx, extra = net_shape(ck["cfg"])
-    actor = Actor(ck["cfg"]["hidden"], ctx=ctx, extra=extra); actor.load_state_dict(ck["actor"]); actor.eval()
+    actor = make_actor(ck["cfg"]); actor.load_state_dict(ck["actor"]); actor.eval()
     prefs, budgets = conditions(budget, a.K)
     skw = sensor_kw(ck["cfg"], a.sensor_noise)
     sols, wall = rl_solve(actor, world, legs_m, prefs, budgets, a.S, budget_obs=bobs, route_obs=robs, **skw)
