@@ -14,9 +14,12 @@ the plan is planned while it is flown, one NMOPSO node at a time, from what the 
                     action space (heading offsets up to +-90 deg from the goal bearing, shorter
                     steps), nearest to the policy's own action first: a trained policy's samples
                     cluster around its mean, i.e. around the blocked direction. If nothing is clear
-                    the drone hovers and scans again (after `max_block` s it flies straight on to
-                    the leg's goal if that is clear, else the leg is skipped and logged)
-  after node n      it flies to the leg's goal, as MyCost.m closes every path.
+                    the drone hovers and scans again; after `max_block` s it flies straight on to
+                    the leg's goal if that is clear, else it retreats `retreat_dist` back along the
+                    flown (known free) track and plans the leg again as a new episode (at most
+                    `max_retries` times), else the leg is skipped and logged
+  after node n      it flies to the leg's goal, as MyCost.m closes every path - only once the scan
+                    shows that closing segment clear too (else the same blocked handling).
 
 The policy's chain (PathEnv) is advanced with the accepted actions, so its observation of the goal,
 reach and heading is exactly the training one; only the scan comes from the real sensors
@@ -45,7 +48,7 @@ from patrol_follower import PatrolFollower  # noqa: E402
 from rlpatrol import sensors as S  # noqa: E402
 from rlpatrol.env import PathEnv  # noqa: E402
 from rlpatrol.nmopso_cost import N_NODES, tmat  # noqa: E402
-from rlpatrol.ppo import Actor, env_kwargs, load_checkpoint, net_shape  # noqa: E402
+from rlpatrol.ppo import env_kwargs, load_checkpoint, make_actor  # noqa: E402
 from rlpatrol.world import load_world  # noqa: E402
 
 BALANCED = [1 / 3, 0.0, 1 / 3, 1 / 3]             # w over F1, F3, F4 for threat-budget checkpoints
@@ -61,16 +64,15 @@ class SensorFollower(PatrolFollower):
         for name, default in (('ckpt', ''), ('budget', 0.6), ('pref', ''), ('scan_topic', ''),
                               ('cloud_topic', ''), ('cloud_frame', 'flu'), ('radius', 0.45), ('samples', 16),
                               ('arrive_dist', 0.3), ('yaw_tol', 0.15), ('max_scan_age', 0.5),
-                              ('max_block', 10.0), ('use_depth', True)):
+                              ('max_block', 10.0), ('use_depth', True), ('max_retries', 2), ('retreat_dist', 1.0)):
             self.declare_parameter(name, default)
         P = lambda k: self.get_parameter(k).value                          # noqa: E731
         ck = load_checkpoint(P('ckpt'))
         cfg = ck['cfg']
         if not cfg.get('sensor_obs', False):
             raise SystemExit(f"{P('ckpt')} is not a sensor-input checkpoint (sensor_obs is off)")
-        ctx, extra = net_shape(cfg)
         torch.set_num_threads(1)
-        self.actor = Actor(cfg['hidden'], ctx=ctx, extra=extra)
+        self.actor = make_actor(cfg)                                       # MLP, or the GRU actor (recurrent)
         self.actor.load_state_dict(ck['actor'])
         self.actor.eval()
         self.cfg = cfg
@@ -82,6 +84,7 @@ class SensorFollower(PatrolFollower):
         self.radius, self.samples = float(P('radius')), int(P('samples'))
         self.arrive, self.yaw_tol = float(P('arrive_dist')), float(P('yaw_tol'))
         self.max_age, self.max_block = float(P('max_scan_age')), float(P('max_block'))
+        self.max_retries, self.retreat_dist = int(P('max_retries')), float(P('retreat_dist'))
         self.cloud_frame, self.use_depth = P('cloud_frame'), bool(P('use_depth'))
 
         with open(self.get_parameter('paths_file').value) as f:
@@ -151,7 +154,7 @@ class SensorFollower(PatrolFollower):
 
     # --- online planning -------------------------------------------------------------------------
     def reset_loop(self):
-        self.leg_i, self.env, self.node_i = 0, None, 0
+        self.leg_i, self.env, self.node_i, self.retries = 0, None, 0, 0
         self.blocked_since = self.arrived = None
         self.loop_done = False
         self.lap_seen = self.lap
@@ -172,6 +175,7 @@ class SensorFollower(PatrolFollower):
         kw = env_kwargs(self.cfg, noise=False, critic=False)
         self.env = PathEnv(w, st, gl, self.pref, budget=None if self.u is None else torch.tensor([self.u], dtype=torch.float64), **kw)
         self.node_i = 0
+        self.actor.reset(1)                                                # a new episode: fresh GRU memory
         self.goal = b
         # turn in place to face the goal: a 1 cm step towards it sets the setpoint yaw
         d = np.array(b[:2]) - np.array(a[:2])
@@ -179,6 +183,50 @@ class SensorFollower(PatrolFollower):
         self.append((self.wp[-1][0] + 0.01 * d[0], self.wp[-1][1] + 0.01 * d[1], self.wp[-1][2]))
         self.arrived = None                                                # the turn's timeout starts now
         self.emit('leg_start', f'{self.leg_i}: {a[:2]} -> {b[:2]}')
+
+    def next_leg(self):
+        self.leg_i += 1
+        self.env, self.retries = None, 0
+
+    def clear_to(self, scan, heading, here, p):
+        v = np.asarray(p[:2], float) - here[:2]
+        return S.segment_clear(scan, heading, math.atan2(v[1], v[0]), float(np.linalg.norm(v)), self.radius)
+
+    def retreat(self, pos):
+        """fly back along the flown track (known free) until retreat_dist from pos."""
+        back = []
+        for p in reversed(self.wp[:-1]):
+            back.append(p)
+            if math.dist(p[:2], pos[:2]) >= self.retreat_dist:
+                break
+        for p in back:
+            self.append(p)
+
+    def blocked(self, now, pos, scan, heading, here, tries, node, a, closing=False):
+        """no clear way on: hover and rescan for max_block s, then (1) fly straight to the leg's goal if the
+        scan shows that clear, else (2) retreat along the flown track and plan the leg again from there as
+        a new episode (fresh memory, a full set of nodes; at most max_retries times), else (3) skip it."""
+        if self.blocked_since is None:                                     # log once per blocked episode
+            self.blocked_since = now
+            self.log_decision(now, pos, 'blocked_closing' if closing else 'blocked', tries, node, a, scan)
+        if now - self.blocked_since < self.max_block:
+            return True
+        self.blocked_since = None
+        if not closing and self.clear_to(scan, heading, here, self.goal):
+            outcome = 'straight_to_goal'
+            self.node_i = N_NODES                                           # closed (and checked again) next call
+        elif self.retries < self.max_retries:
+            outcome = 'retreat_replan'
+            self.retries += 1
+            self.retreat(pos)
+            self.env = None                                                 # the same leg, from the retreat point
+        else:
+            outcome = 'leg_skipped'
+            self.next_leg()
+        self.log_decision(now, pos, outcome, tries, self.goal, [0.0, 0.0, 0.0], scan)
+        self.emit('sensor_blocked', f'leg {self.leg_i} node {self.node_i}: {outcome}')
+        self.get_logger().warn(f'leg {self.leg_i} node {self.node_i}: blocked for {self.max_block:.0f} s -> {outcome}')
+        return True
 
     def track_heading(self):
         """ENU yaw of the last track segment: the setpoint yaw the drone turns to (the policy's chain
@@ -231,50 +279,36 @@ class SensorFollower(PatrolFollower):
                 return False
             self.start_leg()
             return True
-        if self.node_i >= N_NODES:                                         # nodes done: close the leg to its goal
-            self.append(self.goal)
-            self.emit('leg_done', str(self.leg_i))
-            self.leg_i += 1
-            self.env = None
-            return True
         if abs(wrap(self.yaw_enu() - self.track_heading())) > self.yaw_tol and now - self.arrived < 3.0:
             return True                                                    # still turning to the segment's heading
         scan = self.scan_obs(now)
         if scan is None:
             return True                                                    # hover until the lidar is fresh
-        self.env.scan_override = scan[None]
-        o = self.env.obs()
         heading = self.yaw_enu()
         here = np.array(pos)
+        if self.node_i >= N_NODES:                                         # nodes done: close the leg to its goal,
+            if self.clear_to(scan, heading, here, self.goal):              # checked against the scan like every node
+                self.blocked_since = None
+                self.append(self.goal)
+                self.emit('leg_done', str(self.leg_i))
+                self.next_leg()
+                return True
+            return self.blocked(now, pos, scan, heading, here, 0, self.goal, [0.0, 0.0, 0.0], closing=True)
+        self.env.scan_override = scan[None]
+        o = self.env.obs()
         tries, accepted = 0, None
         for a in self.candidates(o):
             node = self.node_for(a)
             tries += 1
-            v = node[:2] - here[:2]
-            if S.segment_clear(scan, heading, math.atan2(v[1], v[0]), float(np.linalg.norm(v)), self.radius):
+            if self.clear_to(scan, heading, here, node):
                 accepted = (a, node)
                 break
         if accepted is None:
-            if self.blocked_since is None:                                 # log once per blocked episode
-                self.blocked_since = now
-                self.log_decision(now, pos, 'blocked', tries, node, a[0].tolist(), scan)
-            if now - self.blocked_since < self.max_block:
-                return True
-            v = np.array(self.goal[:2]) - here[:2]
-            straight = S.segment_clear(scan, heading, math.atan2(v[1], v[0]), float(np.linalg.norm(v)), self.radius)
-            self.log_decision(now, pos, 'straight_to_goal' if straight else 'leg_skipped', tries, self.goal, [0, 0, 0], scan)
-            self.emit('sensor_blocked', f'leg {self.leg_i} node {self.node_i}: '
-                      + ('flying straight to the goal' if straight else 'leg skipped'))
-            self.get_logger().warn(f'leg {self.leg_i} node {self.node_i}: no clear proposal for {self.max_block:.0f} s')
-            self.blocked_since = None
-            if straight:
-                self.node_i = N_NODES                                       # close the leg next call
-            else:
-                self.leg_i += 1
-                self.env = None
-            return True
+            self.actor.discard()                                           # no step: this scan is not remembered
+            return self.blocked(now, pos, scan, heading, here, tries, node, a[0].tolist())
         self.blocked_since = None
         a, node = accepted
+        self.actor.commit()                                                # the GRU remembers this node's scan
         self.env.step(a)                                                   # advance the policy's chain
         self.node_i += 1
         self.append(node)

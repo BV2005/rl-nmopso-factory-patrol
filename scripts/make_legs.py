@@ -18,8 +18,7 @@ from scipy.io import savemat
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch  # noqa: E402
 
-from rlpatrol.legs import random_legs  # noqa: E402
-from rlpatrol.route import route_features, seg_clear  # noqa: E402
+from rlpatrol.legs import blocked_legs, random_legs  # noqa: E402
 from rlpatrol.world import DATA, load_world  # noqa: E402
 
 PREVIEW = DATA / "factory2_auto_full_preview.json"   # planner/factory_patrol dry run, layout factory2_auto_full
@@ -35,17 +34,6 @@ def real_legs():
                 if np.linalg.norm(a[:2] - b[:2]) >= 0.05:           # vertical moves are not NMOPSO legs
                     legs.append(np.r_[a, b])
     return np.array(legs)
-
-
-def blocked_legs(w, n, rng, span=3.0):
-    out = np.zeros((0, 6))
-    while len(out) < n:
-        X = random_legs(w, 4 * n, rng)
-        q, g = torch.tensor(w.to_units(X[:, :3])[:, :2]), torch.tensor(w.to_units(X[:, 3:])[:, :2])
-        _, L = route_features(w, q, g)
-        ok = ~seg_clear(w.threats, q, g) & (L <= span * (g - q).norm(dim=-1))
-        out = np.vstack([out, X[ok.numpy()]])
-    return out[:n]
 
 
 if __name__ == "__main__":

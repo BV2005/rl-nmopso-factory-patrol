@@ -8,6 +8,9 @@
   4. training: a few PPO iterations with sensor_obs + priv_critic + budget + dense, checkpoint
      round trip, and the online LegPlanner on the sensor checkpoint
   5. speed: sim_scan on a training-size batch
+  6. GRU actor (recurrent): rollout log-probabilities = the whole-episode recomputation of the PPO
+     update, the episode-state guard, training with blocked legs, resume of an older checkpoint,
+     the planner; blocked_legs still reproduces data/legs_blocked.mat
   python scripts/test_sensors.py [--device auto] [--batch 512]"""
 import argparse
 import math
@@ -24,7 +27,8 @@ sys.path.insert(0, str(ROOT))
 from rlpatrol import sensors as S  # noqa: E402
 from rlpatrol.env import N_NODES, N_RAYS, OBS_DIM, RAY_MAX, SENSOR_OBS, PathEnv, sample_pref  # noqa: E402
 from rlpatrol.legs import random_legs  # noqa: E402
-from rlpatrol.ppo import Config, critic_extra, load_checkpoint, net_shape, resolve_device, train  # noqa: E402
+from rlpatrol.ppo import (Actor, Config, RecurrentActor, critic_extra, env_kwargs, load_checkpoint, make_actor,  # noqa: E402
+                          net_shape, resolve_device, rollout, sample_budget_pref, train)
 from rlpatrol.world import load_world  # noqa: E402
 
 OK = []
@@ -242,6 +246,81 @@ def speed_checks(world, dev):
     check(s.shape == (B, S.SCAN_BINS) and torch.isfinite(s).all(), f"sim_scan of {B} drones: {dt * 1000:.0f} ms on {dev}")
 
 
+def gru_checks(world, dev, batch):
+    print("[6] GRU actor (recurrent) and blocked training legs")
+    from scipy.io import loadmat
+    from rlpatrol.legs import blocked_legs
+    from rlpatrol.route import seg_clear
+    B = blocked_legs(world, 200, np.random.default_rng(24680))
+    ref = loadmat(str(ROOT / "data" / "legs_blocked.mat"))["legs"]
+    check(B.shape == ref.shape and np.abs(B - ref).max() < 1e-12,
+          f"legs.blocked_legs reproduces data/legs_blocked.mat (max diff {np.abs(B - ref).max():.0e}, float rounding)")
+    q = torch.tensor(world.to_units(B[:, :3])[:, :2], dtype=world.threats.dtype, device=dev)
+    g = torch.tensor(world.to_units(B[:, 3:])[:, :2], dtype=world.threats.dtype, device=dev)
+    check(not bool(seg_clear(world.threats, q, g).any()), "every blocked leg's straight line is blocked")
+
+    cfg = Config(budget=True, dense=True, sensor_obs=True, priv_critic=True, recurrent=True, device=str(dev))
+    actor = make_actor(cfg).to(dev)
+    check(isinstance(actor, RecurrentActor) and isinstance(make_actor(Config()), Actor),
+          "make_actor: recurrent -> RecurrentActor, default -> Actor (old checkpoints)")
+    with torch.no_grad():                                    # a non-zero policy, so the check means something
+        for p in actor.parameters():
+            p.add_(0.05 * torch.randn_like(p))
+    n = 64
+    legs = random_legs(world, n, np.random.default_rng(7))
+    w, u = sample_budget_pref(n, cfg)
+    O, U, LP, R, info, env = rollout(actor, world, legs, w, budget=u, **env_kwargs(cfg))
+    with torch.no_grad():
+        lp2 = Actor.logp(actor.dist_seq(O), U)
+    err = (lp2 - LP).abs().max().item()
+    check(err < 1e-4, f"rollout log-probs = whole-episode recomputation (max diff {err:.1e}): PPO ratios start at 1")
+    o1 = env.obs()
+    actor.reset(n)
+    actor.act(o1)
+    same = actor.act(o1)                                     # the same observation again: same step
+    try:
+        actor.act(o1.clone())
+        guarded = False
+    except RuntimeError:
+        guarded = True
+    check(guarded and same is not None, "a new observation before commit()/discard() is refused")
+    actor.discard()
+    actor.act(o1.clone()); actor.commit()
+    check(actor.h is not None and actor.h.shape == (n, cfg.gru_hidden), "discard() then commit(): the state moves on")
+
+    with tempfile.TemporaryDirectory() as d:
+        ck = Path(d) / "g.pt"
+        cfg = Config(iters=3, batch=batch, minibatch=batch * 2, budget=True, dense=True, budget_pen=50.0, act_pen=0.02,
+                     sensor_obs=True, priv_critic=True, recurrent=True, blocked_frac=0.3, device=str(dev),
+                     probe_every=1, ckpt_every=1)
+        _, _, hist = train(world, cfg, log=lambda s: None, ckpt=ck)
+        check(len(hist) == 3 and all(math.isfinite(h["ret"]) and math.isfinite(h["value_loss"]) and math.isfinite(h["kl"])
+                                     for h in hist),
+              f"3 GRU iterations with 30 % blocked legs: finite (feasible {hist[-1]['feasible'] * 100:.0f} %)")
+        c = load_checkpoint(ck)
+        for k in ("recurrent", "gru_hidden", "blocked_frac", "sensor_obs", "priv_critic", "sensor_noise"):
+            c["cfg"].pop(k, None)                            # as an older checkpoint would have it
+        old = Config(**{k: v for k, v in c["cfg"].items()})
+        c2 = load_checkpoint(ck)
+        ck0 = Path(d) / "old.pt"
+        torch.save({**c2, "cfg": c["cfg"], "actor": c2["actor"]}, ck0)
+        try:
+            # the MLP fields of this GRU checkpoint do not fit an MLP actor: only the config check matters here
+            train(world, Config(**{**old.__dict__, "iters": 4}), log=lambda s: None, resume=load_checkpoint(ck0))
+            resumed = True
+        except ValueError as e:
+            resumed = "config differs" not in str(e)
+        except RuntimeError:                                 # state_dict mismatch: past the config check
+            resumed = True
+        check(resumed, "resume accepts a checkpoint written before the new Config fields (defaults)")
+        from rlpatrol.planner import LegPlanner
+        lp = LegPlanner(ck, n_samples=1, refine=False, device=str(dev))
+        leg = random_legs(world, 1, np.random.default_rng(3))[0]
+        plan = lp.plan(leg[:2], leg[3:5])
+        check(isinstance(plan.feasible, bool) and lp.ckpt_info["recurrent"],
+              f"LegPlanner plans with the GRU checkpoint ({plan.method}, feasible {plan.feasible})")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--device", default="cpu")
@@ -254,6 +333,7 @@ def main():
     env_checks(world, dev)
     train_checks(world, dev, a.batch)
     speed_checks(world, dev)
+    gru_checks(world, dev, a.batch)
     print(f"all {len(OK)} checks passed")
 
 
