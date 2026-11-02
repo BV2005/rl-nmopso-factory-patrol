@@ -214,6 +214,18 @@ exactly the plans that were flown. Each run writes `gazebo/nmopso_demo/run_logs/
 - `summary.txt`, with tracking, clearance, separation and coverage;
 - `flight_check.json`, with the collision verdicts.
 
+## Sensor drone and sensor-input policy (in progress, not yet evaluated)
+
+Everything above plans on the known map: the drones are stock GPS x500s without perception sensors.
+The extension in progress has three parts:
+- **`x500_patrol`** (`gazebo/models/x500_patrol`): a 2D lidar and a forward stereo-depth + RGB camera.
+- **A policy whose inputs are those sensors** (`rlpatrol/sensors.py`, `PathEnv(sensor_obs=True)`,
+  `configs/vS.yaml`). It has a privileged critic during training.
+- **`gazebo/nmopso_demo/sensor_follower.py`**: plans each patrol leg in flight from the live scan.
+
+See `docs/drone_architecture.md` for the design, and `docs/cloud_gpu.md` for how to test, train and fly
+it on a GPU machine (`python scripts/test_sensors.py` first). No results are reported for it yet.
+
 ## Licenses and citation
 
 - **Code in this repository:** Apache-2.0 (`LICENSE`).
