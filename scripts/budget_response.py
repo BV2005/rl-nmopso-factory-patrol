@@ -21,7 +21,7 @@ from scipy.io import loadmat
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "scripts"))
-from evaluate import conditions, load_nmopso, pref_set, rl_solve  # noqa: E402
+from evaluate import conditions, load_nmopso, pref_set, rl_solve, sensor_kw  # noqa: E402
 from rlpatrol.env import F_SCALE  # noqa: E402
 from rlpatrol.ppo import Actor, net_shape  # noqa: E402
 from rlpatrol.world import DATA, load_world  # noqa: E402
@@ -64,7 +64,7 @@ def main():
         actor = Actor(cfg["hidden"], ctx=ctx, extra=extra); actor.load_state_dict(ck["actor"]); actor.eval()
         budget, bobs, robs = cfg.get("budget", False), cfg.get("budget_obs", False), cfg.get("route_obs", False)
         prefs, budgets = conditions(budget, 50)
-        sols, _ = rl_solve(actor, world, legs, prefs, budgets, 3, budget_obs=bobs, route_obs=robs)
+        sols, _ = rl_solve(actor, world, legs, prefs, budgets, 3, budget_obs=bobs, route_obs=robs, **sensor_kw(cfg))
         r = {"budget": budget, "dense": cfg.get("dense", False), "budget_obs": bobs, "route_obs": robs}
         if budget:                                              # the first C rollouts of a leg are deterministic
             bal = [i for i in range(len(prefs)) if np.allclose(prefs[i], BALANCED)]

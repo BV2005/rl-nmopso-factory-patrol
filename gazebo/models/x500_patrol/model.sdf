@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  x500_patrol: the indoor patrol drone whose sensors feed the sensor-input policy (rlpatrol/sensors.py).
+  PX4's x500 (Holybro X500 V2 frame, Pixhawk) plus
+    * 2D lidar (PX4's lidar_2d_v2: 1080 beams over +-135 deg, 0.1-30 m, 30 Hz) on a mast centred over
+      base_link: scan plane 0.315 m above base_link (sensors.LIDAR_Z), above the props and the camera;
+    * forward camera block with OAK-D Lite optics (PX4's OakD-Lite mesh and fields of view): stereo
+      depth 73 x 58 deg, 0.2-19.1 m, at 320 x 240 / 15 Hz (PX4's model: 640 x 480 / 30 Hz, too heavy for
+      three drones in one simulation) and RGB 69 deg at 640 x 360 / 10 Hz (for later perception work);
+      optical centre 0.132 m ahead of and 0.261 m above base_link (sensors.DEPTH_X, DEPTH_Z).
+  Keep the mount poses equal to the constants in rlpatrol/sensors.py.
+  No <topic> on the sensors: Gazebo scopes the default topics by model instance
+  (/world/<w>/model/x500_patrol_<N>/link/...), so three drones do not share a topic. PX4's gz_bridge
+  subscribes to .../link/link/sensor/lidar_2d_v2/scan by itself (obstacle_distance).
+  State estimation stays PX4's stock simulated GPS (see docs/drone_architecture.md).
+-->
+<sdf version='1.9'>
+  <model name='x500_patrol'>
+    <include merge='true'>
+      <uri>x500</uri>
+    </include>
+
+    <!-- 2D lidar on a mast over base_link: link "link", sensor "lidar_2d_v2" -->
+    <include merge='true'>
+      <uri>model://lidar_2d_v2</uri>
+      <pose>0 0 0.26 0 0 0</pose>
+    </include>
+    <joint name="lidar_2d_joint" type="fixed">
+      <parent>base_link</parent>
+      <child>link</child>
+    </joint>
+
+    <!-- forward camera block (OAK-D Lite): stereo depth + RGB -->
+    <link name="camera_link">
+      <pose>0.12 0 0.242 0 0 0</pose>
+      <inertial>
+        <pose>0.00358 0 0.014 0 0 0</pose>
+        <mass>0.061</mass>
+        <inertia>
+          <ixx>0.0000460804</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0.0000055421</iyy>
+          <iyz>0</iyz>
+          <izz>0.0000436519</izz>
+        </inertia>
+      </inertial>
+      <visual name="camera_visual">
+        <pose>0 0.03 0 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <scale>1 1 1</scale>
+            <uri>model://OakD-Lite/meshes/OakDLite.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+      <collision name="camera_collision">
+        <pose>0.00358 0 0.014 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.0175 0.091 0.028</size>
+          </box>
+        </geometry>
+      </collision>
+      <sensor name="depth" type="depth_camera">
+        <gz_frame_id>camera_link</gz_frame_id>
+        <pose>0.01233 0 0.01878 0 0 0</pose>
+        <camera>
+          <horizontal_fov>1.274</horizontal_fov>
+          <image>
+            <width>320</width>
+            <height>240</height>
+            <format>R_FLOAT32</format>
+          </image>
+          <clip>
+            <near>0.2</near>
+            <far>19.1</far>
+          </clip>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.01</stddev>
+          </noise>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>15</update_rate>
+        <visualize>false</visualize>
+      </sensor>
+      <sensor name="rgb" type="camera">
+        <gz_frame_id>camera_link</gz_frame_id>
+        <pose>0.01233 0 0.01878 0 0 0</pose>
+        <camera>
+          <horizontal_fov>1.204</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>360</height>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>100</far>
+          </clip>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>10</update_rate>
+        <visualize>false</visualize>
+      </sensor>
+    </link>
+    <joint name="camera_joint" type="fixed">
+      <parent>base_link</parent>
+      <child>camera_link</child>
+    </joint>
+  </model>
+</sdf>

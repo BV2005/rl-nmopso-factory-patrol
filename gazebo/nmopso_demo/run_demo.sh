@@ -11,6 +11,17 @@
 #   LAPS=0 nmopso_demo/run_demo.sh          patrol until Ctrl-C
 #   SPEED=1.5 nmopso_demo/run_demo.sh       patrol speed (m/s)
 #   TOPVIEW=1 nmopso_demo/run_demo.sh       Gazebo GUI looking straight down on the hall
+#   MODEL=x500_patrol nmopso_demo/run_demo.sh
+#                                           the sensor drone (gazebo/models/x500_patrol: 2D lidar +
+#                                           depth/RGB camera; install it with gazebo/install_patrol_drone.sh).
+#                                           Headless runs render the sensors on the GPU (EGL); one
+#                                           ros_gz_bridge per drone publishes /droneN/scan,
+#                                           /droneN/depth/points (and /droneN/camera/image with RGB=1)
+#   MODEL=x500_patrol SENSOR_CKPT=results/ckpt/vS_seed1.pt nmopso_demo/run_demo.sh
+#                                           PATROL legs planned online from the sensors by the
+#                                           sensor-input policy (sensor_follower.py) instead of flown
+#                                           from the plan; transits as planned. BUDGET=0.6 threat budget,
+#                                           CLOUD_FRAME=optical if the depth points are z-forward
 #
 # worlds/factory.sdf is the factory2 world (= worlds/factory2.sdf of the repository) as given (it already has the magnetometer, IMU,
 # NavSat and air-pressure systems PX4 needs). PX4 is started like
@@ -26,6 +37,12 @@ PATHS="${PATHS:-$DEMO/paths/patrol_paths.json}"
 LOGS="$DEMO/run_logs/$(date +%Y%m%d_%H%M%S)"
 LAPS="${LAPS:-1}"
 SPEED="${SPEED:-1.0}"
+MODEL="${MODEL:-x500}"                       # x500 (stock, GPS) | x500_patrol (sensor drone)
+SENSOR_CKPT="${SENSOR_CKPT:-}"               # a sensor_obs checkpoint: fly PATROL legs with sensor_follower.py
+if [ -n "$SENSOR_CKPT" ]; then
+    SENSOR_CKPT="$(realpath "$SENSOR_CKPT")"
+    [ "$MODEL" = "x500_patrol" ] || { echo "[run_demo] SENSOR_CKPT needs MODEL=x500_patrol"; exit 1; }
+fi
 mkdir -p "$LOGS"
 cp "$PATHS" "$LOGS/patrol_paths.json"
 
@@ -50,10 +67,17 @@ import json; d = json.load(open('$PATHS'))
 for dr in sorted(d['drones'], key=lambda x: x['id']): print(dr['id'], dr['home'][0], dr['home'][1])")
 
 echo "[run_demo] logs: $LOGS"
-export GZ_SIM_RESOURCE_PATH="$DEMO/worlds:$REPO/sim/models:$REPO/sim/worlds:$PX4_DIR/Tools/simulation/gz/models:$PX4_DIR/Tools/simulation/gz/worlds"
+export GZ_SIM_RESOURCE_PATH="$DEMO/worlds:$REPO/models:$REPO/sim/models:$REPO/sim/worlds:$PX4_DIR/Tools/simulation/gz/models:$PX4_DIR/Tools/simulation/gz/worlds"
 GZ_ARGS=(-r -v 1)
 if [ "${TOPVIEW:-0}" = "1" ]; then GZ_ARGS+=(--gui-config "$DEMO/topview.gui.config")
-elif [ "${HEADLESS:-1}" = "1" ]; then GZ_ARGS+=(-s); fi
+elif [ "${HEADLESS:-1}" = "1" ]; then
+    GZ_ARGS+=(-s)
+    # rendered sensors (lidar, cameras) without a display: offscreen EGL rendering on the GPU
+    if [ "$MODEL" != "x500" ]; then GZ_ARGS+=(--headless-rendering); fi
+fi
+if [ "$MODEL" = "x500_patrol" ] && [ ! -e "$PX4_DIR/Tools/simulation/gz/models/x500_patrol" ]; then
+    echo "[run_demo] x500_patrol is not installed in PX4: bash $REPO/install_patrol_drone.sh"; exit 1
+fi
 gz sim "${GZ_ARGS[@]}" "$DEMO/worlds/factory.sdf" > "$LOGS/world.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 60); do gz topic -l 2>/dev/null | grep -q "/world/factory/clock" && break; sleep 1; done
@@ -68,7 +92,7 @@ for h in "${HOMES[@]}"; do
     (
         cd "$PX4_DIR"
         PX4_GZ_WORLDS="$DEMO/worlds" PX4_GZ_WORLD=factory PX4_GZ_STANDALONE=1 \
-        PX4_SIM_MODEL=gz_x500 PX4_SYS_AUTOSTART=4001 PX4_GZ_MODEL_POSE="$X,$Y,0.2,0,0,0" \
+        PX4_SIM_MODEL="gz_$MODEL" PX4_SYS_AUTOSTART=4001 PX4_GZ_MODEL_POSE="$X,$Y,0.2,0,0,0" \
         PX4_UXRCE_DDS_NS="drone$ID" \
         exec ./build/px4_sitl_default/bin/px4 -d -i "$ID"
     ) > "$LOGS/px4_drone$ID.log" 2>&1 &
@@ -76,6 +100,33 @@ for h in "${HOMES[@]}"; do
     echo "[run_demo] PX4 drone $ID at ($X, $Y)"
     sleep 4
 done
+
+# sensor bridges (x500_patrol): the Gazebo sensor topics of each drone -> ROS 2 /droneN/...
+if [ "$MODEL" = "x500_patrol" ]; then
+    for h in "${HOMES[@]}"; do
+        read -r ID X Y <<< "$h"
+        base="/world/factory/model/x500_patrol_$ID/link"
+        scan="$base/link/sensor/lidar_2d_v2/scan"
+        points="$base/camera_link/sensor/depth/depth_image/points"
+        image="$base/camera_link/sensor/rgb/image"
+        for _ in $(seq 60); do gz topic -l 2>/dev/null | grep -qx "$scan" && break; sleep 1; done
+        if ! gz topic -l 2>/dev/null | grep -qx "$scan"; then
+            echo "[run_demo] drone $ID: no $scan; its topics:"; gz topic -l | grep "x500_patrol_$ID" | head -20; exit 1
+        fi
+        gz topic -l 2>/dev/null | grep -qx "$points" || echo "[run_demo] drone $ID: WARNING no $points (lidar only)"
+        cfg="$LOGS/bridge_drone$ID.yaml"
+        {
+            echo "- {ros_topic_name: /drone$ID/scan, gz_topic_name: $scan, ros_type_name: sensor_msgs/msg/LaserScan, gz_type_name: gz.msgs.LaserScan, direction: GZ_TO_ROS}"
+            echo "- {ros_topic_name: /drone$ID/depth/points, gz_topic_name: $points, ros_type_name: sensor_msgs/msg/PointCloud2, gz_type_name: gz.msgs.PointCloudPacked, direction: GZ_TO_ROS}"
+            if [ "${RGB:-0}" = "1" ]; then
+                echo "- {ros_topic_name: /drone$ID/camera/image, gz_topic_name: $image, ros_type_name: sensor_msgs/msg/Image, gz_type_name: gz.msgs.Image, direction: GZ_TO_ROS}"
+            fi
+        } > "$cfg"
+        ros2 run ros_gz_bridge parameter_bridge --ros-args -p config_file:="$cfg" > "$LOGS/bridge_drone$ID.log" 2>&1 &
+        PIDS+=($!)
+        echo "[run_demo] sensor bridge drone $ID: /drone$ID/scan, /drone$ID/depth/points"
+    done
+fi
 
 # 10 Hz state and event recorder (drone_states.csv, events.csv), started before the followers
 python3 "$DEMO/patrol_recorder.py" --ros-args -p paths_file:="$PATHS" -p out_dir:="$LOGS" \
@@ -86,9 +137,16 @@ PIDS+=($RECORDER)
 FOLLOWERS=()
 for h in "${HOMES[@]}"; do
     read -r ID X Y <<< "$h"
-    python3 "$DEMO/patrol_follower.py" --ros-args -p drone_id:="$ID" -p paths_file:="$PATHS" \
-        -p log_file:="$LOGS/trace_drone$ID.csv" -p laps:="$LAPS" -p speed:="$SPEED" \
-        > "$LOGS/follower_drone$ID.log" 2>&1 &
+    if [ -n "$SENSOR_CKPT" ]; then
+        PYTHONPATH="$REPO/..:$DEMO${PYTHONPATH:+:$PYTHONPATH}" python3 "$DEMO/sensor_follower.py" --ros-args \
+            -p drone_id:="$ID" -p paths_file:="$PATHS" -p log_file:="$LOGS/trace_drone$ID.csv" -p laps:="$LAPS" \
+            -p speed:="$SPEED" -p ckpt:="$SENSOR_CKPT" -p budget:="${BUDGET:-0.6}" \
+            -p cloud_frame:="${CLOUD_FRAME:-flu}" > "$LOGS/follower_drone$ID.log" 2>&1 &
+    else
+        python3 "$DEMO/patrol_follower.py" --ros-args -p drone_id:="$ID" -p paths_file:="$PATHS" \
+            -p log_file:="$LOGS/trace_drone$ID.csv" -p laps:="$LAPS" -p speed:="$SPEED" \
+            > "$LOGS/follower_drone$ID.log" 2>&1 &
+    fi
     FOLLOWERS+=($!)
     PIDS+=($!)
 done

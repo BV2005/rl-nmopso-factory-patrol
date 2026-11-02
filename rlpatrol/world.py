@@ -56,13 +56,19 @@ def load_world(name="factory2_model.json", device="cpu", dtype=torch.float64) ->
                  z_patrol=float(J["zPatrol"]), rects=np.array(J["rects"], float))
 
 
-def with_extra(world, cyl_m):
+def with_extra(world, cyl_m, boxes=None):
     """the world plus extra cylinders [x y R] metres (e.g. an unexpected obstacle), as NMOPSO's
-    CreateModel.m adds extra_threats; rays are cast directly."""
+    CreateModel.m adds extra_threats; rays are cast directly.
+    boxes: optional [k, 5] physical boxes [xmin xmax ymin ymax top] (metres) of the extra obstacles,
+    added to rects so the simulated sensors (rlpatrol/sensors.py) see them; leave None for virtual
+    keep-out cylinders (e.g. around the launch pads) that nothing physical marks."""
+    rects = world.rects
+    if boxes is not None:
+        rects = np.vstack([np.zeros((0, 5)) if rects is None else rects, np.asarray(boxes, float).reshape(-1, 5)])
     cyl_m = np.atleast_2d(np.asarray(cyl_m, float))
     s = world.scale
     t = np.c_[(cyl_m[:, 0] - world.hall[0]) * s + 1, (cyl_m[:, 1] - world.hall[2]) * s + 1,
               np.zeros(len(cyl_m)), cyl_m[:, 2] * s]
     th = torch.cat([world.threats, torch.as_tensor(t, dtype=world.threats.dtype)])
     return World(hall=world.hall, scale=s, bounds=world.bounds, threats=th, cyl_m=np.vstack([world.cyl_m, cyl_m]),
-                 cyl_margin=world.cyl_margin, z_patrol=world.z_patrol, rects=world.rects, direct_rays=True)
+                 cyl_margin=world.cyl_margin, z_patrol=world.z_patrol, rects=rects, direct_rays=True)
