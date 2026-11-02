@@ -6,7 +6,7 @@ import json
 import math
 import os
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 
 import numpy as np
 import torch
@@ -14,7 +14,7 @@ import torch.nn as nn
 
 from .env import BUDGET_OBS, N_NODES, N_RAYS, OBS_DIM, ROUTE_OBS, SENSOR_OBS, PathEnv, sample_pref
 from .sensors import SensorSpec
-from .legs import random_legs
+from .legs import blocked_legs, random_legs
 
 
 @dataclass
@@ -50,6 +50,9 @@ class Config:
     sensor_obs: bool = False        # the actor sees the x500_patrol lidar + depth scan instead of oracle geometry
     priv_critic: bool = False       # asymmetric actor-critic: the critic also sees the oracle features (needs sensor_obs)
     sensor_noise: bool = True       # sensor_obs: simulate sensor noise, dropout and pose error (domain randomisation)
+    recurrent: bool = False         # GRU actor: memory of the episode's earlier observations (RecurrentActor)
+    gru_hidden: int = 128           # GRU state size (recurrent)
+    blocked_frac: float = 0.0       # share of training legs whose straight line is blocked (legs.blocked_legs)
     seed: int = 1
     threads: int = 0                # 0: torch default
     device: str = "cpu"             # cpu | cuda | auto (cuda if available)
@@ -119,6 +122,103 @@ class Actor(nn.Module):
     def logp(d, u):
         return (d.log_prob(u) - 2 * (math.log(2) - u - nn.functional.softplus(-2 * u))).sum(-1)
 
+    # the episode interface of RecurrentActor; an MLP has no state
+    recurrent = False
+
+    def reset(self, B=None):
+        pass
+
+    def commit(self):
+        pass
+
+    def discard(self):
+        pass
+
+    def dist_seq(self, O):
+        return self.dist(O)
+
+
+class RecurrentActor(nn.Module):
+    """tanh-squashed Gaussian like Actor, with a GRU memory over the episode's observations: the node
+    decision at step t sees the current observation and a summary of steps 0..t-1 (the scans of
+    obstacles already passed, where the openings were). The GRU state depends on the observations
+    only, never on the sampled actions, so several actions can be drawn for one observation.
+
+    Episode interface (every caller that steps an episode):
+      reset(B)        new episodes (zero state)
+      act(o) / dist(o)  the decision for observation o; calling it again with the same tensor o
+                      (deterministic + sampled candidates) reuses the same step
+      commit()        after the step was taken: the state moves on to include o
+      discard()       no step taken (e.g. the drone hovers and scans again): forget o
+      dist_seq(O)     [n, T, D] whole episodes from the zero state, with gradients (PPO update)"""
+    recurrent = True
+
+    def __init__(self, h, log_std0=-1.2, ctx=4, extra=0, gru=128):
+        super().__init__()
+        self.ctx = ctx
+        self.enc = nn.Linear(OBS_DIM + extra + ctx - 4, h)
+        self.gru = nn.GRUCell(h, gru)
+        self.l2 = nn.Linear(h + gru + ctx, h)          # the current features skip past the GRU
+        self.l3 = nn.Linear(h + ctx, h)
+        self.out = nn.Linear(h + ctx, 3)
+        nn.init.zeros_(self.out.weight); nn.init.zeros_(self.out.bias)       # start at the zero action
+        self.log_std = nn.Parameter(torch.full((3,), log_std0))
+        self.h, self._pend = None, None
+
+    def step_mu(self, o, h):
+        w = o[..., -self.ctx:]
+        x = torch.tanh(self.enc(o))
+        h = self.gru(x, h)
+        z = torch.tanh(self.l2(torch.cat([x, h, w], -1)))
+        z = torch.tanh(self.l3(torch.cat([z, w], -1)))
+        return self.out(torch.cat([z, w], -1)), h
+
+    def zero_state(self, n, ref):
+        return torch.zeros(n, self.gru.hidden_size, dtype=ref.dtype, device=ref.device)
+
+    def dist_seq(self, O):
+        h, mus = self.zero_state(len(O), O), []
+        for t in range(O.shape[1]):
+            mu, h = self.step_mu(O[:, t], h)
+            mus.append(mu)
+        return torch.distributions.Normal(torch.stack(mus, 1), self.log_std.exp())
+
+    def reset(self, B=None):
+        self.h, self._pend = None, None
+
+    def dist(self, o):
+        if self._pend is not None:
+            if self._pend[0] is o:
+                return self._pend[1]
+            raise RuntimeError("RecurrentActor: a new observation before commit() or discard() of the last one")
+        h = self.h if self.h is not None else self.zero_state(len(o), o)
+        mu, h2 = self.step_mu(o, h)
+        d = torch.distributions.Normal(mu, self.log_std.exp())
+        self._pend = (o, d, h2)
+        return d
+
+    def act(self, o, deterministic=False):
+        d = self.dist(o)
+        u = d.mean if deterministic else d.sample()
+        return torch.tanh(u), u, Actor.logp(d, u)
+
+    def commit(self):
+        if self._pend is not None:
+            self.h = self._pend[2].detach()
+            self._pend = None
+
+    def discard(self):
+        self._pend = None
+
+
+def make_actor(cfg, log_std0=-1.2):
+    """the actor of a Config or a checkpoint's cfg dict (recurrent: RecurrentActor, else Actor)."""
+    get = _getter(cfg)
+    ctx, extra = net_shape(cfg)
+    if get("recurrent", False):
+        return RecurrentActor(get("hidden", 256), log_std0, ctx, extra, get("gru_hidden", 128))
+    return Actor(get("hidden", 256), log_std0, ctx, extra)
+
 
 def _getter(cfg):
     return cfg.get if isinstance(cfg, dict) else lambda k, d=None: getattr(cfg, k, d)
@@ -163,9 +263,12 @@ def check_config(cfg):
 
 
 def training_legs(world, n, rng, cfg):
-    k = int(round(cfg.real_frac * n))
-    return np.vstack([random_legs(world, k, rng, cfg.lmin, cfg.lmax),
-                      random_legs(world, n - k, rng, 1.5, cfg.lmax_long)])
+    nb = int(round(getattr(cfg, "blocked_frac", 0.0) * n))       # blocked legs (detours), off by default
+    k = int(round(cfg.real_frac * (n - nb)))
+    parts = [random_legs(world, k, rng, cfg.lmin, cfg.lmax), random_legs(world, n - nb - k, rng, 1.5, cfg.lmax_long)]
+    if nb:
+        parts.append(blocked_legs(world, nb, rng))
+    return np.vstack(parts)
 
 
 def sample_budget_pref(B, cfg, gen=None):
@@ -187,10 +290,12 @@ def rollout(actor, world, legs_m, pref, deterministic=False, shape=0.0, scalar="
                   sensor_spec=sensor_spec)
     O, OC, U, LP, R = [], [], [], [], []
     info = None
+    actor.reset(len(legs_m))
     for _ in range(N_NODES):
         o, oc = env.obs_pair()
         with torch.no_grad():
             a, u, lp = actor.act(o, deterministic)
+        actor.commit()
         r, done, info = env.step(a)
         O.append(o); OC.append(oc); U.append(u); LP.append(lp); R.append(r)
     O = torch.stack(O, 1)
@@ -277,7 +382,7 @@ def train(world, cfg: Config, log=print, ckpt=None, resume=None, metrics=None, s
     rng = np.random.default_rng(cfg.seed + 777)       # test legs use seed 12345
     probe_legs = training_legs(world, 1024, np.random.default_rng(999), cfg)
     ctx, extra = net_shape(cfg)
-    actor = Actor(cfg.hidden, cfg.log_std0, ctx, extra).to(dev)
+    actor = make_actor(cfg, cfg.log_std0).to(dev)
     crit = PrefMLP(cfg.hidden, 1, ctx, critic_extra(cfg)).to(dev)
     opt_a = torch.optim.Adam(actor.parameters(), lr=cfg.lr)
     opt_v = torch.optim.Adam(crit.parameters(), lr=cfg.lr_v)
@@ -289,7 +394,9 @@ def train(world, cfg: Config, log=print, ckpt=None, resume=None, metrics=None, s
             raise ValueError("checkpoint has no optimiser state (written before resumable checkpoints); "
                              "it can be evaluated but not resumed")
         old = resume["cfg"]
-        diff = {k: (old.get(k), v) for k, v in asdict(cfg).items() if k not in RESUMABLE and old.get(k) != v}
+        dflt = {f.name: f.default for f in fields(Config)}           # fields added after the checkpoint was written
+        diff = {k: (old.get(k, dflt[k]), v) for k, v in asdict(cfg).items()
+                if k not in RESUMABLE and old.get(k, dflt[k]) != v}
         if diff:
             raise ValueError(f"config differs from the checkpoint's in non-resumable fields: {diff}")
         actor.load_state_dict(resume["actor"]); crit.load_state_dict(resume["critic"])
@@ -345,10 +452,16 @@ def train(world, cfg: Config, log=print, ckpt=None, resume=None, metrics=None, s
         snap_v = {k: v.clone() for k, v in crit.state_dict().items()}
         kl, ep, skipped = 0.0, 0, 0
         pls, vls, ents, cfs = [], [], [], []
+        if actor.recurrent:                                  # whole episodes: the GRU needs the sequence
+            o, u, lp, ad = (x.reshape(B, T, *x.shape[1:]) for x in (o, u, lp, ad))
+            oc, rt = oc.reshape(B, T, -1), rt.reshape(B, T)
+            n_items, mb = B, max(1, cfg.minibatch // T)
+        else:
+            n_items, mb = B * T, cfg.minibatch
         for ep in range(cfg.epochs):
             kls = []
-            for idx in torch.randperm(B * T, device=dev).split(cfg.minibatch):
-                d = actor.dist(o[idx])
+            for idx in torch.randperm(n_items, device=dev).split(mb):
+                d = actor.dist_seq(o[idx])
                 nlp = Actor.logp(d, u[idx])
                 lr_ = nlp - lp[idx]
                 ratio = lr_.exp()

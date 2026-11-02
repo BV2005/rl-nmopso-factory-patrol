@@ -35,6 +35,17 @@ python scripts/evaluate.py --ckpt results/ckpt/vS_seed1.pt --legs blocked
 python scripts/evaluate.py --ckpt results/ckpt/vB_seed1.pt --legs real               # the oracle baseline
 ```
 
+GRU actor for obstacle robustness (memory of the earlier scans + 30 % blocked training legs):
+
+```bash
+python scripts/train.py --name vSG_seed1 --config configs/vSG.yaml --seed 1
+python scripts/evaluate.py --ckpt results/ckpt/vSG_seed1.pt --legs blocked     # vS seed 1: HV 0.458, 184/200
+python scripts/evaluate.py --ckpt results/ckpt/vSG_seed1.pt --legs real
+# ablations (which half helps?): vS + blocked legs only, vS + GRU only
+python scripts/train.py --name vSb_seed1 --config configs/vS.yaml --seed 1 --blocked_frac 0.3
+python scripts/train.py --name vSr_seed1 --config configs/vS.yaml --seed 1 --recurrent true
+```
+
 The question to answer is how much HV and feasibility is lost when the policy sees only the 27-bin
 scan instead of oracle geometry (vB). The privileged critic should close part of that gap; to measure
 how much, train once with `--priv_critic false` as the ablation.

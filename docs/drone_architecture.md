@@ -63,6 +63,13 @@ yaw; the follower converts it (`yaw_enu = pi/2 - heading`).
 | threat-to-go of the known cylinders (`budget_obs`) | vB | **no** | yes |
 | threat budget u, preference | yes | yes | yes |
 
+**Memory (vSG, `recurrent`).** The vS actor is an MLP: each node is decided from the current scan only,
+so it forgets an obstacle once it leaves the 270 deg view and never commits to a side. The GRU actor
+(`ppo.RecurrentActor`) carries a state over the episode's observations: it sees the current scan and
+a summary of the earlier ones. The state depends on observations only, never on the sampled
+actions, so the planner and the flight follower can still draw several candidate actions per node.
+`configs/vSG.yaml` also trains on 30 % blocked legs, so the memory is trained on detours.
+
 The critic is privileged (asymmetric actor-critic). It uses the oracle features to judge returns
 better during training. Only the actor is deployed, and it never needs them.
 

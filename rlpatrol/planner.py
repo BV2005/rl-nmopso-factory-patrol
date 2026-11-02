@@ -41,7 +41,7 @@ import torch
 from .env import F_SCALE, PathEnv
 from .metrics import short_safe
 from .nmopso_cost import N_NODES
-from .ppo import Actor, env_kwargs, load_checkpoint, net_shape, resolve_device
+from .ppo import env_kwargs, load_checkpoint, make_actor, resolve_device
 from .refine import WEIGHTS, cem
 from .world import load_world
 
@@ -92,13 +92,12 @@ class LegPlanner:
             torch.set_num_threads(threads)
         ck = load_checkpoint(ckpt, map_location=self.dev)
         cfg = ck["cfg"]
-        ctx, extra = net_shape(cfg)
-        self.actor = Actor(cfg["hidden"], ctx=ctx, extra=extra).to(self.dev)
+        self.actor = make_actor(cfg).to(self.dev)
         self.actor.load_state_dict(ck["actor"])
         self.actor.eval()
         self.ckpt_info = {"path": str(ckpt), "iteration": ck.get("it", len(ck.get("hist", [])) - 1),
                           "seed": cfg.get("seed"), "hidden": cfg["hidden"], "format": ck.get("format", 1),
-                          **{k: cfg.get(k, False) for k in ("budget", "budget_obs", "route_obs", "sensor_obs")}}
+                          **{k: cfg.get(k, False) for k in ("budget", "budget_obs", "route_obs", "sensor_obs", "recurrent")}}
         self.world = load_world(device=self.dev)
         self.budget_obs, self.route_obs = cfg.get("budget_obs", False), cfg.get("route_obs", False)
         # sensor-input checkpoints plan offline from the scans the drone would take (simulated on the map)
@@ -152,10 +151,12 @@ class LegPlanner:
         w = self.world
         env = PathEnv(w, w.to_units(L[:, :3]), w.to_units(L[:, 3:]), pr, budget=bu, **self.obs_kw)
         enc = []
+        self.actor.reset(len(L))
         with torch.no_grad():
             for _ in range(N_NODES):
                 o = env.obs()
                 a = torch.where(det[:, None], self.actor.act(o, True)[0], self.actor.act(o)[0])
+                self.actor.commit()
                 a = torch.where(straight[:, None], torch.zeros_like(a), a)
                 if not torch.isfinite(a).all():
                     raise FloatingPointError("policy produced a non-finite action")
