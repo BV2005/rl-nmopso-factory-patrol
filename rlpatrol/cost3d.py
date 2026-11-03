@@ -19,6 +19,8 @@ from .nmopso_cost import DANGER, DRONE, N_NODES
 
 UNITS = 10.0
 TOP_INF = 1e9
+DANGER_M = DANGER / UNITS        # 1 m, MyCost.m danger_dist
+DRONE_M = DRONE / UNITS          # 0.1 m, MyCost.m drone_size
 
 
 def cost3d(P, n_pts, cyl, cmask, zband=(1.6, 2.0), details=False):
@@ -96,4 +98,72 @@ def segment_check(a, b, cyl, cmask):
     below = (zlow - c[..., 3] - DRONE < 0) & cmask
     hit = ((d < c[..., 2] + DRONE) & below).any(-1)
     gap = torch.where(below, (d - c[..., 2] - DRONE) / UNITS, torch.full_like(d, math.inf))
+    return hit, gap.min(-1).values
+
+
+# --- the box collision model (round 3) ---------------------------------------------------------------------------
+# NMOPSO's cylinder cover makes the collision zone 0.5-1.0 m wider than the boxes, by an amount that depends
+# on the obstacle and on where along it - invisible to the sensors. The box model's zone is every box grown
+# by one fixed margin (e.g. 0.5 m): the scan can report the distance to it exactly (scan3d margin), in
+# training and in flight (inflated_bins). J1, J3, J4 are MyCost's; J2 is MyCost's threat with the
+# segment-to-box distance (minus the margin) in place of the segment-to-cylinder distance (minus R + DRONE).
+def _pbox(px, py, b):
+    return torch.hypot(torch.clamp(torch.maximum(b[..., 0] - px, px - b[..., 1]), min=0),
+                       torch.clamp(torch.maximum(b[..., 2] - py, py - b[..., 3]), min=0))
+
+
+def seg_box_dist(a, b, boxes):
+    """horizontal distance (m) between segments a -> b ([..., S, 2]) and boxes ([..., K, >= 4]):
+    [..., S, K]; 0 where the segment crosses the box."""
+    a, b = a[..., :, None, :], b[..., :, None, :]
+    bx = boxes[..., None, :, :]
+    d = b - a
+    eps = 1e-12
+    dx = torch.where(d[..., 0].abs() < eps, torch.full_like(d[..., 0], eps), d[..., 0])
+    dy = torch.where(d[..., 1].abs() < eps, torch.full_like(d[..., 1], eps), d[..., 1])
+    tx1, tx2 = (bx[..., 0] - a[..., 0]) / dx, (bx[..., 1] - a[..., 0]) / dx
+    ty1, ty2 = (bx[..., 2] - a[..., 1]) / dy, (bx[..., 3] - a[..., 1]) / dy
+    tin = torch.maximum(torch.minimum(tx1, tx2), torch.minimum(ty1, ty2))
+    tout = torch.minimum(torch.maximum(tx1, tx2), torch.maximum(ty1, ty2))
+    cross = (tout >= tin) & (tout >= 0) & (tin <= 1)
+    dist = torch.minimum(_pbox(a[..., 0], a[..., 1], bx), _pbox(b[..., 0], b[..., 1], bx))
+    ee = (d * d).sum(-1).clamp_min(1e-300)
+    for cx, cy in ((0, 2), (0, 3), (1, 2), (1, 3)):                 # box corners to the segment
+        c = torch.stack([bx[..., cx], bx[..., cy]], -1)
+        t = (((c - a) * d).sum(-1) / ee).clamp(0, 1)
+        dist = torch.minimum(dist, (a + t[..., None] * d - c).norm(dim=-1))
+    return torch.where(cross, torch.zeros_like(dist), dist)
+
+
+def cost3d_box(P, n_pts, boxes, kmask, margin=0.5, zband=(1.6, 2.0), details=False):
+    """MyCost-3D with the box collision model: boxes [B, K, 5] metres (obstacles only, no walls), kmask [B, K]."""
+    B = len(P)
+    none = torch.zeros(B, 1, 4, dtype=P.dtype, device=P.device)
+    F0, short, _ = cost3d(P, n_pts, none, torch.zeros(B, 1, dtype=torch.bool, device=P.device), zband, details=True)
+    N = P.shape[1]
+    ar = torch.arange(N, device=P.device)
+    sval = ar[None, :-1] < (n_pts[:, None] - 1)
+    d = seg_box_dist(P[:, :-1, :2], P[:, 1:, :2], boxes)                # [B, S, K]
+    zlow = torch.minimum(P[:, :-1, 2], P[:, 1:, 2])[..., None]
+    above = zlow - boxes[:, None, :, 4] - DRONE_M
+    valid = sval[..., None] & kmask[:, None, :]
+    tc = (1 - (d - margin) / DANGER_M).clamp(0, 1) * (1 - above / DANGER_M).clamp(0, 1) * valid
+    hit = (d < margin) & (above < 0) & valid
+    J2soft = tc.sum((-1, -2)) / (sval.sum(-1).clamp_min(1) * kmask.sum(-1).clamp_min(1))
+    J2 = torch.where(hit.any(-1).any(-1), torch.full_like(J2soft, math.inf), J2soft)
+    F = torch.stack([F0[:, 0], J2, F0[:, 2], F0[:, 3]], -1)
+    if not details:
+        return F
+    pen = (((margin - d).clamp_min(0) * (above < 0) * valid) / DANGER_M).sum((-1, -2))
+    return F, pen + short, J2soft
+
+
+def segment_check_box(a, b, boxes, kmask, margin=0.5):
+    """(hit [B], clearance [B] m) of segments a -> b ([B, 3]) in the box model (clearance = distance -
+    margin to the nearest box it does not pass over)."""
+    d = seg_box_dist(a[:, None, :2], b[:, None, :2], boxes)[:, 0]      # [B, K]
+    zlow = torch.minimum(a[:, 2], b[:, 2])[:, None]
+    below = (zlow - boxes[..., 4] - DRONE_M < 0) & kmask
+    hit = ((d < margin) & below).any(-1)
+    gap = torch.where(below, d - margin, torch.full_like(d, math.inf))
     return hit, gap.min(-1).values

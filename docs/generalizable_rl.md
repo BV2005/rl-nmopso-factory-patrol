@@ -205,3 +205,42 @@ for c in vG2_seed2 vG2_seed3 vG2_plr_dr_seed1 vG_p2_seed1; do python scripts/eva
 python scripts/eval_worlds.py --ckpt results/ckpt/vG2_seed1.pt --baselines results/ckpt/vS_seed1.pt,results/ckpt/vB_seed1.pt \
        --candidates 3 --sets factory2_real,factory2_blocked,heldout --worlds 20 --legs 8
 ```
+
+---
+
+## Round 2 results and why round 3 changes the environment, not the reward
+Round 2 (3 seeds) did **not** significantly improve on round 1: held-out success 73.0–73.9 % vs 73.6 %,
+OOD 78.3 % vs 78.6 %, HV +1.5 % (within noise), blocked legs worse. Both rounds plateau at ~80 % probe
+feasibility: the ceiling comes from the environment, so reward tuning cannot move it.
+- **~14 % of generated legs were impossible**: their start or goal lay inside the NMOPSO collision zone
+  (legs only had to be 0.35 m from the boxes; the cylinder cover reaches 0.5–1.0 m beyond them).
+- **The safety margin was invisible**: the scan measured the physical boxes, the collision check used the
+  inflated cylinder cover, whose extra width varies (0.5–1.0 m) with the obstacle and the position along it.
+Also found: route / ray table memory caches keyed by `id(world)` gave vB other worlds' route tables in
+eval_worlds (vB factory2 blocked 92.5 / 40 / 36.5 % across identical runs); fixed (content hash), vB re-evaluated.
+
+## Round 3 (this commit): steps 1 and 2
+1. **Clean legs.** `worldgen.zone_clearance`, `GenWorld.ends_ok`: every leg end is outside the collision zone of
+   *both* models by `LEG_MARGIN` (0.25 m); unexpected boxes are placed so that the leg ends stay clear (else
+   skipped). Measured: 0 / 6000 leg ends in a zone (round 2: 6.8 % of ends, 13.8 % of legs impossible).
+2. **Box collision model** (`collision: box`, `box_margin: 0.5`): the collision zone is every obstacle box grown
+   by one fixed margin (standard costmap inflation). `cost3d.cost3d_box` / `segment_check_box` (exact
+   segment-to-box distance, 3D overfly rule; J1, J3, J4 as MyCost, J2 with the box distance); the scan reports
+   ranges **to the zone** (`scan3d.sim_scan_b(margin=...)`), and `scan3d.inflated_bins` computes the same from a
+   point cloud in flight. The NMOPSO cylinder model stays the default (rounds 1–2 unchanged).
+   Evaluation re-scores every vG path with NMOPSO's cylinder model (`success_nmopso`, `F_nmopso`, and the HV of
+   `--candidates`), so box-model vG is judged by the same objectives as vS / vB.
+
+Runs (RunPod): `vG3_box` (step 1 + 2) and a control `vG3_cyl` = round-2 config on the clean legs (step 1 only):
+```bash
+git pull && python scripts/test_generalizable.py --device cuda
+for s in 1 2; do
+  nohup python scripts/train_g.py --name vG3_box_seed$s --config configs/vG3_box.yaml --seed $s > results/runs/vG3_box_seed${s}_runner.out 2>&1 &
+  nohup python scripts/train_g.py --name vG3_cyl_seed$s --config configs/vG2.yaml --seed $s > results/runs/vG3_cyl_seed${s}_runner.out 2>&1 &
+done
+python scripts/eval_worlds.py --ckpt results/ckpt/vG3_box_seed1.pt --baselines results/ckpt/vS_seed1.pt,results/ckpt/vB_seed1.pt
+for c in vG3_box_seed2 vG3_cyl_seed1 vG3_cyl_seed2 vG2_seed1; do python scripts/eval_worlds.py --ckpt results/ckpt/$c.pt; done
+python scripts/eval_worlds.py --ckpt results/ckpt/vG3_box_seed1.pt --baselines results/ckpt/vS_seed1.pt,results/ckpt/vB_seed1.pt \
+       --candidates 3 --sets factory2_real,factory2_blocked,heldout --worlds 20 --legs 8
+```
+Note: all evaluations now use the clean legs, so re-evaluate vG2 / vS / vB on them (above) before comparing with round 3.

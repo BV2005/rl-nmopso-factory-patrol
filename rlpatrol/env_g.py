@@ -27,7 +27,7 @@ import numpy as np
 import torch
 
 from . import sensors as S
-from .cost3d import TOP_INF, cost3d, segment_check, segment_hits
+from .cost3d import TOP_INF, cost3d, cost3d_box, segment_check, segment_check_box, segment_hits
 from .env import BUDGET_PEN, F_SCALE, INFEASIBLE, S_MAX, SOFT_SCALE, sample_pref
 from .nmopso_cost import N_NODES
 from .scan3d import sim_scan_b, walls
@@ -101,11 +101,17 @@ def build_batch(items, device="cpu", dtype=torch.float64):
 class GenEnv:
     def __init__(self, batch, pref, budget=None, modes="all", domain=Domain(), budget_pen=BUDGET_PEN, act_pen=0.02,
                  wall_margin=1.0, generator=None, wq=(1.0, 1.0, 1.0, 1.0), c_back=C_BACK, c_climb=C_CLIMB,
-                 c_prox=0.0, d_safe=0.5, max_back=MAX_BACK):
+                 c_prox=0.0, d_safe=0.5, max_back=MAX_BACK, collision="cyl", box_margin=0.5):
         """wq: weights of F1..F4 in the scalarised terminal cost (round 2: path length, altitude and
         smoothness count more); c_prox: per-step penalty c_prox * (1 - clearance / d_safe) for a step
         that passes within d_safe of an obstacle (round 2: fewer crashes); c_back, c_climb, max_back:
-        costs and limit of the recovery modes."""
+        costs and limit of the recovery modes; collision: "cyl" (NMOPSO cylinder cover, rounds 1-2) or
+        "box" (obstacle boxes grown by box_margin; the scan then reports ranges to that zone, round 3)."""
+        if collision not in ("cyl", "box"):
+            raise ValueError(f"collision must be cyl or box, not {collision!r}")
+        self.collision, self.box_margin = collision, box_margin
+        self.obst = batch["kmask"].clone()
+        self.obst[:, -4:] = False                                              # the hall walls are not obstacles
         self.b = batch
         legs = batch["legs"]
         dev, dt = legs.device, legs.dtype
@@ -144,8 +150,18 @@ class GenEnv:
         if self.u is not None:                                                 # the straight path's threat
             s = torch.linspace(0, 1, N_NODES + 2, dtype=dt, device=dev)[None, :, None]
             Pst = self.start[:, None] + s * (self.goal - self.start)[:, None]
-            F = cost3d(Pst, torch.full((B,), N_NODES + 2, device=dev), batch["cyl"], batch["cmask"], ZBAND, details=True)
+            F = self._cost(Pst, torch.full((B,), N_NODES + 2, device=dev), details=True)
             self.eps = self.u * F[2]
+
+    def _cost(self, P, n, details=False):
+        if self.collision == "box":
+            return cost3d_box(P, n, self.b["boxes"], self.obst, self.box_margin, ZBAND, details=details)
+        return cost3d(P, n, self.b["cyl"], self.b["cmask"], ZBAND, details=details)
+
+    def _check(self, a, b):
+        if self.collision == "box":
+            return segment_check_box(a, b, self.b["boxes"], self.obst, self.box_margin)
+        return segment_check(a, b, self.b["cyl"], self.b["cmask"])
 
     def _uniform(self, lo, hi):
         return lo + (hi - lo) * torch.rand(self.B, dtype=self.dt, device=self.dev, generator=self.gen)
@@ -167,7 +183,8 @@ class GenEnv:
         p = self.cur.clone()
         p[:, 2] = p[:, 2] + self.mount
         spec = self.spec if noise else S.SensorSpec(noise=False)
-        return sim_scan_b(self.b["boxes"], self.b["kmask"], p, self.heading, spec, self.gen)
+        return sim_scan_b(self.b["boxes"], self.b["kmask"], p, self.heading, spec, self.gen,
+                          margin=self.box_margin if self.collision == "box" else 0.0)
 
     def legal(self, heights=None, ranges=None):
         """[B, 3] bool: advance always; climb if allowed and a known obstacle ahead is low enough;
@@ -206,9 +223,9 @@ class GenEnv:
         if not priv:
             return o, None, L
         ri, hi = self.scans(noise=False)
-        vis = (~segment_hits(p, self.goal, self.b["cyl"], self.b["cmask"])).to(self.dt)
+        vis = (~self._check(p, self.goal)[0]).to(self.dt)
         Pg = torch.stack([p, self.goal], 1)
-        tg = cost3d(Pg, torch.full((self.B,), 2, device=self.dev), self.b["cyl"], self.b["cmask"], ZBAND, details=True)[2]
+        tg = self._cost(Pg, torch.full((self.B,), 2, device=self.dev), details=True)[2]
         oc = torch.cat([core, r.to(self.dt), h.to(self.dt), tabu, L.to(self.dt), ri.to(self.dt), hi.to(self.dt),
                         vis[:, None], (tg / F_SCALE[1].item()).clamp(-5, 5)[:, None]] + ctx, -1).float()
         return o, oc, L
@@ -261,7 +278,7 @@ class GenEnv:
             climbz = (q[:, 2] - ZBAND[1]).clamp_min(0)
             rew = rew - torch.where(move, self.c_climb * climbz, torch.zeros_like(rew))
             self.n_climb = self.n_climb + (move & (mode == CLIMB)).long()
-            hit, margin = segment_check(self.cur, q, self.b["cyl"], self.b["cmask"])
+            hit, margin = self._check(self.cur, q)
             hit = hit & move
             if self.c_prox > 0:
                 near = (1 - margin / self.d_safe).clamp(0, 1)
@@ -294,7 +311,7 @@ class GenEnv:
 
     def _terminal(self):
         P, n = self.path()
-        F, viol, J2s = cost3d(P, n, self.b["cyl"], self.b["cmask"], ZBAND, details=True)
+        F, viol, J2s = self._cost(P, n, details=True)
         feas = torch.isfinite(F).all(-1)
         Ff = F.nan_to_num(posinf=1e6)
         s = (self.pref * self.wq * Ff / F_SCALE.to(Ff)).sum(-1)

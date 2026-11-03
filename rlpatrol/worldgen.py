@@ -20,6 +20,26 @@ import numpy as np
 
 Z_PATROL = 1.8
 RACK_TOP, RACK_T = 3.5, 0.4
+DRONE_M = 0.1          # NMOPSO drone size (MyCost.m DRONE = 1 unit), metres
+BOX_MARGIN = 0.5       # collision margin of the box collision model (cost3d.cost3d_box), metres
+LEG_MARGIN = 0.25      # leg ends keep this much more than the collision zone of either model
+
+
+def zone_clearance(P, cyl, boxes, box_margin=BOX_MARGIN):
+    """[N] clearance (m) of points P [N, 2] to the collision zones of both models: the NMOPSO cylinder
+    cover (distance - R - DRONE) and the box model (box distance - box_margin); +inf without obstacles."""
+    P = np.asarray(P, float).reshape(-1, 2)
+    out = np.full(len(P), np.inf)
+    if len(cyl):
+        c = np.asarray(cyl, float)
+        d = np.hypot(P[:, None, 0] - c[None, :, 0], P[:, None, 1] - c[None, :, 1]) - c[None, :, 2] - DRONE_M
+        out = np.minimum(out, d.min(1))
+    if len(boxes):
+        b = np.asarray(boxes, float)
+        dx = np.maximum(np.maximum(b[None, :, 0] - P[:, None, 0], 0), P[:, None, 0] - b[None, :, 1])
+        dy = np.maximum(np.maximum(b[None, :, 2] - P[:, None, 1], 0), P[:, None, 1] - b[None, :, 3])
+        out = np.minimum(out, (np.hypot(dx, dy) - box_margin).min(1))
+    return out
 
 
 @dataclass
@@ -105,12 +125,19 @@ class GenWorld:
             ok &= ~((x > x0 - c) & (x < x1 + c) & (y > y0 - c) & (y < y1 + c))
         return ok
 
+    def ends_ok(self, P):
+        """[N] bool: points P [N, 2] are in the main free component and outside the collision zone of
+        both collision models by LEG_MARGIN (a leg that starts or ends in the zone is impossible)."""
+        P = np.asarray(P, float).reshape(-1, 2)
+        return self.point_free(P[:, 0], P[:, 1]) & (zone_clearance(P, self.cyl, self.boxes) >= LEG_MARGIN)
+
     def sample_legs(self, n, rng, lmin=1.5, lmax=12.0, z=Z_PATROL):
-        """n legs [ax ay az bx by bz] with both ends in the main free component, length in [lmin, lmax]."""
+        """n legs [ax ay az bx by bz] with both ends in the main free component and outside both collision
+        zones (ends_ok), length in [lmin, lmax]."""
         out = np.zeros((0, 6))
         h, m = self.hall, self.params.wall_margin
         lo, hi = np.array([h[0] + m, h[2] + m]), np.array([h[1] - m, h[3] - m])
-        for _ in range(200):
+        for _ in range(400):
             if len(out) >= n:
                 break
             k = 4 * (n - len(out)) + 32
@@ -119,7 +146,7 @@ class GenWorld:
             L = rng.uniform(lmin, lmax, k)
             b = a + L[:, None] * np.c_[np.cos(ang), np.sin(ang)]
             ok = (b >= lo).all(1) & (b <= hi).all(1)
-            ok &= self.point_free(a[:, 0], a[:, 1]) & self.point_free(b[:, 0], b[:, 1])
+            ok &= self.ends_ok(a) & self.ends_ok(b)
             zz = np.full((ok.sum(), 1), z)
             out = np.vstack([out, np.hstack([a[ok], zz, b[ok], zz])])
         if len(out) < n:
@@ -287,9 +314,15 @@ def generate(seed, p=TRAIN, max_tries=50):
     raise RuntimeError(f"no valid world for seed {seed}")
 
 
-def unexpected_box(leg, rng, size=(0.4, 1.0), top=(0.8, 2.6)):
-    """an obstacle box on the middle part of a leg's straight line (the map does not have it)."""
+def unexpected_box(leg, rng, size=(0.4, 1.0), top=(0.8, 2.6), tries=10):
+    """an obstacle box on the middle part of a leg's straight line (the map does not have it), placed so
+    that the leg's start and goal stay outside its collision zones (both models) by LEG_MARGIN; None if
+    no such placement is found (short leg)."""
     a, b = np.asarray(leg[:2]), np.asarray(leg[3:5])
-    c = a + rng.uniform(0.35, 0.65) * (b - a)
-    sx, sy = rng.uniform(*size, 2)
-    return np.array([c[0] - sx / 2, c[0] + sx / 2, c[1] - sy / 2, c[1] + sy / 2, rng.uniform(*top)])
+    for _ in range(tries):
+        c = a + rng.uniform(0.35, 0.65) * (b - a)
+        sx, sy = rng.uniform(*size, 2)
+        box = np.array([c[0] - sx / 2, c[0] + sx / 2, c[1] - sy / 2, c[1] + sy / 2, rng.uniform(*top)])
+        if (zone_clearance(np.array([a, b]), cylinders(box[None]), box[None]) >= LEG_MARGIN).all():
+            return box
+    return None

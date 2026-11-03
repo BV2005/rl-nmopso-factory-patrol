@@ -11,6 +11,10 @@
   6. round 2: defaults == round 1 (old checkpoints), proximity penalty near obstacles only, heavier
      quality weights never improve the terminal reward, exploration decay caps the std, the
      evaluation domain is noise-free, the candidate-set protocol (HV) runs
+  7. round 3: no leg starts / ends in a collision zone (either model), unexpected boxes keep them clear;
+     segment-to-box distance exact (vs brute force); box-model cost (beside / through / over a box) and
+     collision check agree; the scan reports ranges to the zone (margin) and inflated_bins gives the same
+     from a point cloud (flight); box-model training + NMOPSO re-scoring in eval_worlds
   python scripts/test_generalizable.py [--device cpu] [--batch 256]"""
 import argparse
 import json
@@ -251,6 +255,85 @@ def round2_checks(dev, batch_n):
         (ROOT / "results" / "eval_g_selftest_cand.json").unlink(missing_ok=True)
 
 
+def round3_checks(dev, batch_n):
+    print("[7] round 3: clean legs, box collision model")
+    from rlpatrol.cost3d import cost3d_box, seg_box_dist, segment_check_box
+    from rlpatrol.scan3d import inflated_bins
+    from rlpatrol.worldgen import LEG_MARGIN, unexpected_box, zone_clearance
+    rng = np.random.default_rng(3)
+    bad = tot = 0
+    clear_extra = True
+    for s in range(20):
+        w = generate(100 + s)
+        L = w.sample_legs(40, rng)
+        for P in (L[:, :2], L[:, 3:5]):
+            bad += int((zone_clearance(P, w.cyl, w.boxes) < LEG_MARGIN).sum()); tot += len(P)
+        for l in L[:8]:
+            b = unexpected_box(l, rng)
+            if b is not None:
+                clear_extra &= bool((zone_clearance(np.array([l[:2], l[3:5]]), cylinders(b[None]), b[None]) >= LEG_MARGIN).all())
+    check(bad == 0 and clear_extra, f"no leg end in a collision zone ({tot} ends, round 2: 6.8 %); unexpected boxes keep ends clear")
+    g = torch.Generator().manual_seed(4)
+    a = torch.rand(64, 1, 2, dtype=torch.float64, generator=g) * 6 - 3
+    bb = torch.rand(64, 1, 2, dtype=torch.float64, generator=g) * 6 - 3
+    c = torch.rand(64, 1, 2, dtype=torch.float64, generator=g) * 4 - 2
+    box = torch.cat([c[..., :1] - 0.5, c[..., :1] + 0.5, c[..., 1:] - 0.3, c[..., 1:] + 0.3, torch.full((64, 1, 1), 2.0, dtype=torch.float64)], -1)
+    d = seg_box_dist(a, bb, box)[:, 0, 0]
+    t = torch.linspace(0, 1, 4001, dtype=torch.float64)[None, :, None]
+    pts = a + t * (bb - a)
+    dx = torch.clamp(torch.maximum(box[..., 0] - pts[..., 0], pts[..., 0] - box[..., 1]), min=0)
+    dy = torch.clamp(torch.maximum(box[..., 2] - pts[..., 1], pts[..., 1] - box[..., 3]), min=0)
+    brute = torch.hypot(dx, dy).min(1).values
+    check(bool((d <= brute + 1e-9).all() and (brute - d).max() < 3e-3),
+          f"segment-to-box distance exact (vs 4001-point brute force, max gap {(brute - d).max().item():.1e} m)")
+    B1 = torch.tensor([[[-0.5, 0.5, -0.5, 0.5, 3.0]]], dtype=torch.float64)
+    m1 = torch.ones(1, 1, dtype=torch.bool)
+    n3 = torch.tensor([3])
+    side = torch.tensor([[[-4.0, 1.1, 1.8], [0.0, 1.1, 1.8], [4.0, 1.1, 1.8]]], dtype=torch.float64)   # 0.6 m beside
+    near = torch.tensor([[[-4.0, 0.9, 1.8], [0.0, 0.9, 1.8], [4.0, 0.9, 1.8]]], dtype=torch.float64)   # 0.4 m beside
+    over = torch.tensor([[[-4.0, 0.0, 1.8], [0.0, 0.0, 2.4], [4.0, 0.0, 1.8]]], dtype=torch.float64)
+    low = B1.clone(); low[..., 4] = 1.0
+    ok = (torch.isfinite(cost3d_box(side, n3, B1, m1)).all() and torch.isinf(cost3d_box(near, n3, B1, m1)[0, 1])
+          and torch.isfinite(cost3d_box(over, n3, low, m1)).all() and torch.isinf(cost3d_box(over, n3, B1, m1)[0, 1]))
+    check(bool(ok), "box model: 0.6 m beside a box feasible, 0.4 m collides (margin 0.5), over a 1.0 m box feasible, over 3.0 m not")
+    A = torch.rand(256, 3, dtype=torch.float64, generator=g) * 4 - 2; A[:, 2] = 1.8
+    Bq = torch.rand(256, 3, dtype=torch.float64, generator=g) * 4 - 2; Bq[:, 2] = 1.8
+    hit, gap = segment_check_box(A, Bq, B1.repeat(256, 1, 1), m1.repeat(256, 1))
+    Fh = cost3d_box(torch.stack([A, Bq], 1), torch.full((256,), 2), B1.repeat(256, 1, 1), m1.repeat(256, 1))[:, 1]
+    check(bool((hit == torch.isinf(Fh)).all()) and bool(((gap < 0) == hit).all()),
+          f"collision check == cost-model collision on 256 random segments ({int(hit.sum())} hits)")
+    far = [[-50.3, -50, -50, 50, 10], [50, 50.3, -50, 50, 10], [-50, 50, -50.3, -50, 10], [-50, 50, 50, 50.3, 10]]
+    bx = torch.tensor([far + [[-6, 6, 5.0, 5.4, 3.5]]], dtype=torch.float64)          # a rack 5 m to the left
+    p = torch.tensor([[0.0, 0, 1.8]], dtype=torch.float64)
+    r0, _ = sim_scan_b(bx, torch.ones(1, 5, dtype=torch.bool), p, torch.zeros(1, dtype=torch.float64), S.SensorSpec(noise=False))
+    r5, _ = sim_scan_b(bx, torch.ones(1, 5, dtype=torch.bool), p, torch.zeros(1, dtype=torch.float64), S.SensorSpec(noise=False), margin=0.5)
+    side_bin = int(np.argmin(np.abs(S.bin_centres().numpy() - math.pi / 2)))
+    check(abs((r0[0, side_bin] - r5[0, side_bin]).item() * S.SCAN_MAX - 0.5) < 1e-6,
+          f"scan margin: the rack 5 m to the left reads {r5[0, side_bin].item() * S.SCAN_MAX:.2f} m (zone at 4.5 m)")
+    xs = np.linspace(-6, 6, 2401)
+    surf = np.c_[xs, np.full_like(xs, 5.0)]                                            # the rack's near face
+    ib = inflated_bins(surf, 0.5)
+    sim = r5[0].numpy() * S.SCAN_MAX
+    lidar_only = np.abs(S.bin_centres().numpy()) > S.DEPTH_HFOV / 2 + S.BIN
+    m = lidar_only & np.isfinite(ib) & (sim < S.SCAN_MAX - 1e-6)
+    err = np.abs(ib[m] - sim[m]).max() if m.any() else 1.0
+    check(m.any() and err < 0.03, f"inflated_bins (flight, point cloud) == simulated zone ranges ({m.sum()} bins, max {err:.3f} m)")
+    W = [generate(s) for s in range(6)]
+    with tempfile.TemporaryDirectory() as d:
+        ck = Path(d) / "r3.pt"
+        c3 = ConfigG(iters=3, batch=batch_n, minibatch=batch_n * 4, levels_per_iter=8, device=str(dev), probe_every=1,
+                     collision="box", box_margin=0.5, c_prox=0.5)
+        _, _, hist, _ = train_g(c3, log=lambda s: None, ckpt=ck, worlds=W)
+        check(len(hist) == 3 and all(math.isfinite(h["ret"]) for h in hist),
+              f"box-model training finite (feasible {hist[-1]['feasible'] * 100:.0f} %, crash {hist[-1]['crash'] * 100:.0f} %)")
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "eval_worlds.py"), "--ckpt", str(ck), "--sets",
+                            "heldout,factory2_real", "--worlds", "2", "--legs", "4", "--tag", "selftest_r3"],
+                           capture_output=True, text=True, cwd=ROOT)
+        ok = r.returncode == 0 and "NMOPSO model" in r.stdout
+        check(ok, "eval_worlds re-scores box-model paths with NMOPSO's cylinder model" + ("" if ok else f": {r.stderr[-600:]}"))
+        (ROOT / "results" / "eval_g_selftest_r3.json").unlink(missing_ok=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--device", default="cpu")
@@ -265,6 +348,7 @@ def main():
     env_checks(dev, a.batch)
     ppo_checks(dev, a.batch)
     round2_checks(dev, a.batch)
+    round3_checks(dev, a.batch)
     print(f"all {len(OK)} checks passed")
 
 
