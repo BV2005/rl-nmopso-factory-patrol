@@ -223,7 +223,8 @@ class GenEnv:
 
     def step(self, mode, a):
         """mode [B] long, a [B, 3] in [-1, 1] -> reward [B] float32, done (all episodes finished)."""
-        a = a.to(self.dt).clamp(-1, 1)
+        a = a.to(device=self.dev, dtype=self.dt).clamp(-1, 1)            # callers may pass CPU tensors
+        mode = mode.to(self.dev)
         mode = torch.where(self.alive, mode, torch.full_like(mode, ADVANCE))
         rew = torch.zeros(self.B, dtype=self.dt, device=self.dev)
         idx = torch.arange(self.B, device=self.dev)

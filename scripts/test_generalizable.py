@@ -139,7 +139,7 @@ def env_checks(dev, batch_n):
     up = env2.alive & (env2.k == 1)
     check(bool((env2.cur[up, 2] > ZBAND[1] + 0.05).all()), "climb rises above the patrol band")
     env3 = GenEnv(b, w, u)
-    tot = torch.zeros(B)
+    tot = torch.zeros(B, device=dev)
     for t in range(T_DEC):
         _, _, L = env3.obs_pair(False)
         mode = torch.multinomial(L.float(), 1)[:, 0]
@@ -155,7 +155,7 @@ def ppo_checks(dev, batch_n):
     print("[5] PPO, PLR, training, evaluation")
     W = [generate(s) for s in range(8)]
     cfg = ConfigG(modes="all")
-    actor = make_actor_g(cfg)
+    actor = make_actor_g(cfg).to(dev)
     with torch.no_grad():
         for p in actor.parameters():
             p.add_(0.05 * torch.randn_like(p))
