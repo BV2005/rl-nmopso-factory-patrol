@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .env_g import ADVANCE, BACK, DR, OBS_BASE, PRIV, T_DEC, GenEnv, sample_conditions
+from .env_g import ADVANCE, BACK, C_BACK, C_CLIMB, DR, MAX_BACK, OBS_BASE, PRIV, T_DEC, GenEnv, sample_conditions
 from .scan3d import walls
 from .worldgen import TRAIN, cylinders, generate, unexpected_box
 
@@ -66,6 +66,17 @@ class ConfigG:
     ckpt_every: int = 10
     snapshot_every: int = 0
     probe_every: int = 20
+    # round 2 (defaults = round 1)
+    w_len: float = 1.0                 # weights of F1 path length, F3 altitude, F4 smoothness in the terminal cost
+    w_alt: float = 1.0
+    w_smooth: float = 1.0
+    c_back: float = C_BACK
+    c_climb: float = C_CLIMB
+    max_back: int = MAX_BACK
+    c_prox: float = 0.0                # per-step proximity penalty (fewer crashes)
+    d_safe: float = 0.5                # m
+    noise_decay: bool = False          # anneal the exploration: log_std cap -> log_std_end, entropy bonus -> 0
+    log_std_end: float = -2.2
 
 
 RESUMABLE = {"iters", "device", "threads", "ckpt_every", "snapshot_every", "probe_every"}
@@ -244,9 +255,18 @@ class PLR:
 
 
 # --- rollouts -----------------------------------------------------------------------------------------------------
-def rollout_g(actor, batch, pref, budget, cfg, deterministic=False, priv=True, generator=None):
-    env = GenEnv(batch, pref, budget, modes=_get(cfg, "modes", "all"), domain=DR[_get(cfg, "dr", 0)],
-                 budget_pen=_get(cfg, "budget_pen", 50.0), act_pen=_get(cfg, "act_pen", 0.02), generator=generator)
+def env_options(cfg):
+    """the GenEnv reward options of a ConfigG or a checkpoint's cfg dict (round-1 checkpoints: defaults)."""
+    g = lambda k, d: _get(cfg, k, d)  # noqa: E731
+    return dict(modes=g("modes", "all"), budget_pen=g("budget_pen", 50.0), act_pen=g("act_pen", 0.02),
+                wq=(g("w_len", 1.0), 1.0, g("w_alt", 1.0), g("w_smooth", 1.0)), c_back=g("c_back", C_BACK),
+                c_climb=g("c_climb", C_CLIMB), c_prox=g("c_prox", 0.0), d_safe=g("d_safe", 0.5),
+                max_back=g("max_back", MAX_BACK))
+
+
+def rollout_g(actor, batch, pref, budget, cfg, deterministic=False, priv=True, generator=None, domain=None):
+    """domain: override the training domain randomisation (evaluation: env_g.EVAL)."""
+    env = GenEnv(batch, pref, budget, domain=domain or DR[_get(cfg, "dr", 0)], generator=generator, **env_options(cfg))
     O, OC, MO, U, LP, R, AL, LG = [], [], [], [], [], [], [], []
     for _ in range(T_DEC):
         alive = env.alive.clone()
@@ -356,6 +376,8 @@ def train_g(cfg: ConfigG, log=print, ckpt=None, resume=None, metrics=None, snaps
         ad, rt = adv.reshape(-1)[keep], ret.reshape(-1)[keep]
         ad = (ad - ad.mean()) / (ad.std() + 1e-8)
         n = len(ad)
+        frac = it / max(cfg.iters - 1, 1)
+        ent_coef = cfg.ent * (1 - frac) if cfg.noise_decay else cfg.ent
         kls, pls, vls, ents = [], [], [], []
         ep = 0
         for ep in range(cfg.epochs):
@@ -370,7 +392,7 @@ def train_g(cfg: ConfigG, log=print, ckpt=None, resume=None, metrics=None, snaps
                 vl = (crit(oc[idx]).squeeze(-1) - rt[idx]).pow(2).mean()
                 if not _finite(pl, vl):
                     continue
-                opt_a.zero_grad(); (pl - cfg.ent * ent).backward()
+                opt_a.zero_grad(); (pl - ent_coef * ent).backward()
                 nn.utils.clip_grad_norm_(actor.parameters(), 0.5); opt_a.step()
                 opt_v.zero_grad(); vl.backward()
                 nn.utils.clip_grad_norm_(crit.parameters(), 1.0); opt_v.step()
@@ -380,6 +402,9 @@ def train_g(cfg: ConfigG, log=print, ckpt=None, resume=None, metrics=None, snaps
             kls.append(kl)
             if not ek or kl > cfg.target_kl:
                 break
+        if cfg.noise_decay:                                 # cap the exploration noise, linearly in training time
+            with torch.no_grad():
+                actor.log_std.clamp_(max=cfg.log_std0 + frac * (cfg.log_std_end - cfg.log_std0))
         st = episode_stats(env)
         modes = torch.bincount(mo, minlength=3).float() / max(len(mo), 1)
         row = dict(it=it, ret=(R * m).sum(1).mean().item(), **st, mode_frac=modes.tolist(), kl=kls[-1] if kls else math.nan,
