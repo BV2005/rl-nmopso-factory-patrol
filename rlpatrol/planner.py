@@ -86,7 +86,12 @@ class LegPlan:
 
 class LegPlanner:
     def __init__(self, ckpt, n_prefs=50, n_samples=3, refine=True, device="cpu", threads=0, seed=0,
-                 free_search_radius=3.0, keep_in=None, sensor_noise=False):
+                 free_search_radius=3.0, keep_in=None, sensor_noise=False, grid="cyl", radius=0.35):
+        """grid: the free-space map of the A* routes (plan_route). "cyl" (default): world.free, the NMOPSO
+        cylinders plus cylMargin; "physical": outside the physical obstacle boxes (sensors.scene_boxes:
+        rects, walls, and the boxes of with_extra) inflated by `radius` - the NMOPSO cylinder cover and
+        margins can close aisles that are open in reality, and the safety margin is the path cost's job
+        (MyCost threat), not the route's."""
         self.dev = resolve_device(device)
         if threads:
             torch.set_num_threads(threads)
@@ -107,6 +112,16 @@ class LegPlanner:
         self.S, self.refine, self.seed, self.free_r = n_samples, refine, seed, free_search_radius
         self.keep_in = None if keep_in is None else tuple(float(v) for v in keep_in)
         self.ckpt_info["keep_in"] = self.keep_in
+        if grid not in ("cyl", "physical"):
+            raise ValueError(f"grid must be 'cyl' or 'physical', not {grid!r}")
+        self.grid, self.radius = grid, float(radius)
+        self.ckpt_info["grid"] = grid
+
+    def set_world(self, world):
+        """plan in another world from now on (e.g. the prior map plus obstacles found in flight,
+        world.with_extra); the cached route grid is rebuilt."""
+        self.world = world
+        self.__dict__.pop("_free_grid", None)
 
     # --- free space --------------------------------------------------------------------------------
     def in_box(self, x, y):
@@ -119,6 +134,18 @@ class LegPlanner:
     def free(self, x, y):
         """world.free inside the keep-in box."""
         return self.world.free(x, y) & self.in_box(x, y)
+
+    def route_free(self, x, y):
+        """the free space of the A* routes and their line-of-sight checks (see grid)."""
+        if self.grid == "cyl":
+            return self.free(x, y)
+        from .sensors import scene_boxes
+        x, y = np.asarray(x, float), np.asarray(y, float)
+        ok = self.in_box(x, y) & np.ones(np.broadcast(x, y).shape, bool)
+        r = self.radius
+        for x0, x1, y0, y1, _ in scene_boxes(self.world).cpu().numpy():
+            ok &= ~((x >= x0 - r) & (x <= x1 + r) & (y >= y0 - r) & (y <= y1 + r))
+        return ok
 
     def is_free(self, xy):
         return bool(self.free(np.float64(xy[0]), np.float64(xy[1])))
@@ -227,14 +254,14 @@ class LegPlanner:
             h, res = self.world.hall, 0.2
             xs, ys = np.arange(h[0], h[1] + 1e-9, res), np.arange(h[2], h[3] + 1e-9, res)
             X, Y = np.meshgrid(xs, ys, indexing="ij")
-            self._free_grid = (xs, ys, res, self.free(X, Y))
+            self._free_grid = (xs, ys, res, self.route_free(X, Y))
         return self._free_grid
 
     def line_of_sight(self, a, b, step=0.05):
         n = max(2, int(np.ceil(np.linalg.norm(np.subtract(b, a)) / step)) + 1)
         t = np.linspace(0, 1, n)[:, None]
         q = np.asarray(a) + t * (np.asarray(b) - np.asarray(a))
-        return bool(self.free(q[:, 0], q[:, 1]).all())
+        return bool(self.route_free(q[:, 0], q[:, 1]).all())
 
     def astar(self, a, b):
         """8-connected A* on a 0.2 m grid of world.free from free point a to free point b; [m, 2] metres
@@ -244,9 +271,11 @@ class LegPlanner:
         ok = lambda c: 0 <= c[0] < nx and 0 <= c[1] < ny and G[c]
 
         def snap(p):
-            """the free grid cell nearest to p (a free point on the margin may round into a blocked cell)."""
+            """the free grid cell nearest to p (a free point on the margin may round into a blocked cell;
+            a drone that flew close to an obstacle may be inside the margin): within free_search_radius."""
             fx, fy = (p[0] - xs[0]) / res, (p[1] - ys[0]) / res
-            cand = [(int(math.floor(fx)) + dx, int(math.floor(fy)) + dy) for dx in range(-2, 4) for dy in range(-2, 4)]
+            k = int(math.ceil(self.free_r / res))
+            cand = [(int(math.floor(fx)) + dx, int(math.floor(fy)) + dy) for dx in range(-k, k + 2) for dy in range(-k, k + 2)]
             cand = [c for c in cand if ok(c)]
             return min(cand, key=lambda c: (c[0] - fx) ** 2 + (c[1] - fy) ** 2) if cand else None
 
