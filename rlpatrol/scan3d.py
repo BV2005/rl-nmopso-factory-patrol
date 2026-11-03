@@ -45,9 +45,15 @@ def _ray_boxes(o, d, boxes):
     return t_in, t_out
 
 
-def sim_scan_b(boxes, kmask, pos, yaw, spec=None, generator=None):
-    """-> (ranges [B, SCAN_BINS] normalised as sensors.to_obs, heights [B, SCAN_BINS] / H_MAX), float32."""
+def sim_scan_b(boxes, kmask, pos, yaw, spec=None, generator=None, margin=0.0):
+    """-> (ranges [B, SCAN_BINS] normalised as sensors.to_obs, heights [B, SCAN_BINS] / H_MAX), float32.
+    margin > 0: the ranges are to the obstacles grown by margin (the box collision model's zone), i.e. what
+    inflated_bins computes from the real point cloud in flight."""
     spec = spec or S.SensorSpec()
+    if margin:
+        boxes = boxes.clone()
+        boxes[..., 0] -= margin; boxes[..., 2] -= margin
+        boxes[..., 1] += margin; boxes[..., 3] += margin
     dt, dev = pos.dtype, pos.device
     B = len(pos)
 
@@ -103,3 +109,26 @@ def sim_scan_b(boxes, kmask, pos, yaw, spec=None, generator=None):
         r = torch.where(drop, torch.full_like(r, math.inf), r)
         h = torch.where(drop, torch.zeros_like(h), h)
     return (r / S.SCAN_MAX).clamp(max=1.0).nan_to_num(1.0).float(), h.float()
+
+
+def inflated_bins(points, margin, beams_per_bin=40):
+    """flight side of sim_scan_b(margin=...): sensor points [N, 2] (metres, drone frame: x forward, y left,
+    origin at the sensor) -> [SCAN_BINS] metres to the zone of radius `margin` around the points along each
+    bin's beams (the nearest per bin; inf without one). For a dense cloud on an obstacle's surface this is
+    the range to the obstacle grown by margin, as the simulated scan in training."""
+    import numpy as np
+    p = np.asarray(points, float).reshape(-1, 2)
+    out = np.full(S.SCAN_BINS, np.inf)
+    if not len(p):
+        return out
+    c = S.bin_centres().numpy()
+    off = (np.linspace(-0.5, 0.5, beams_per_bin) if beams_per_bin > 1 else np.zeros(1)) * S.BIN
+    th = (c[:, None] + off[None]).reshape(-1)                            # beams
+    r = np.hypot(p[:, 0], p[:, 1])
+    ang = np.arctan2(p[:, 1], p[:, 0])
+    dlt = ang[None] - th[:, None]
+    lat, along = r[None] * np.sin(dlt), r[None] * np.cos(dlt)
+    ok = (np.abs(lat) < margin) & (along > -margin)
+    t = np.where(ok, along - np.sqrt(np.clip(margin ** 2 - lat ** 2, 0, None)), np.inf).clip(min=0)
+    tb = np.where(ok, t, np.inf).min(1)
+    return tb.reshape(S.SCAN_BINS, -1).min(1)
