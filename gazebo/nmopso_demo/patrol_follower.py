@@ -235,6 +235,14 @@ class PatrolFollower(Node):
         The planned demo flies fixed tracks: never."""
         return False
 
+    def local_wait(self, now, pos):
+        """True while a local planner overrides the track (the carrot waits). Planned demo: never."""
+        return False
+
+    def adjust_setpoint(self, now, pos, p, yaw):
+        """the setpoint actually flown (a local planner may replace the track's). Planned demo: unchanged."""
+        return p, yaw
+
     def emit(self, event, detail=''):
         """publishes an event for patrol_recorder.py"""
         m = String()
@@ -303,6 +311,7 @@ class PatrolFollower(Node):
                         self.get_logger().info(f'task {stop[1]} completed ({now - self.t0:.1f} s since start)')
                         self.stop_i += 1
                         self.hover_since = None
+            wait = self.local_wait(now, pos) or wait                   # a local planner has control
             if math.dist(pos, carrot) < self.max_lead and not wait:
                 self.s += self.speed * 0.05
             # the next phase starts only once the drone has reached the end of the track (not just
@@ -331,6 +340,7 @@ class PatrolFollower(Node):
                             self.set_phase('LAND')
                             return
             p, yaw = self.point_at(self.s)
+            p, yaw = self.adjust_setpoint(now, pos, p, yaw)
             self.publish_sp(*p, yaw)
         elif self.phase == 'LAND':
             # hover over home, then auto-land; once on the ground for 3 s, disarm and finish
