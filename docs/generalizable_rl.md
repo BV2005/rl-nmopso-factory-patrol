@@ -124,3 +124,44 @@ minutes (cached).
   hybrid log-prob rollout = recomputation (as the GRU check); existing test_sensors / smoke_test pass.
 - Short CPU training (10 iters) on generated worlds end-to-end; then GPU runs per phase.
 - Generalization: held-out and OOD tables vs vS/vB/VFH+; factory2 benchmark not regressing vs vS.
+
+---
+
+## Implementation status (this branch)
+Implemented as new modules; the existing vS / vB code paths are unchanged.
+
+| Plan item | File | Status |
+|---|---|---|
+| World generator, cylinder cover (port of `factory_cylinders.m`), validity, SDF export | `rlpatrol/worldgen.py`, `scripts/make_worlds.py` | done |
+| MyCost-3D, batched per-episode worlds (== MyCost on 2D paths, 1.6e-15) | `rlpatrol/cost3d.py` | done |
+| Batched fused scan + obstacle-height scan (== `sensors.sim_scan`) | `rlpatrol/scan3d.py` | done |
+| Env: decision stack, advance / climb / backtrack, tabu, legal masks, DR, privileged obs | `rlpatrol/env_g.py` | done |
+| Hybrid-action PPO, privileged critic, PLR, vectorised level batches, resumable checkpoints | `rlpatrol/ppo_g.py`, `scripts/train_g.py` | done |
+| Phase configs P1–P4 | `configs/vG_p1..p4.yaml` | done |
+| Generalization benchmark (held-out, OOD, factory2; vS / vB baselines) | `scripts/eval_worlds.py` | done |
+| Tests (23 checks) | `scripts/test_generalizable.py` | pass (CPU) |
+| VFH+ + backtracking baseline in eval_worlds | — | not yet |
+| Per-world route features in the privileged critic (uses goal visibility + threat-to-go instead) | — | simplified |
+| `LOCAL=vg` in the global-local follower | `global-local-planner` branch | after merge |
+| Training runs + results | RunPod | not yet |
+
+Deviations from the plan, on purpose: the privileged critic uses true goal visibility, ideal scans and
+the straight threat-to-go instead of per-world Dijkstra route features (cost); `dense` threat shaping
+is not ported (terminal reward + per-decision costs); GAE uses lam = 0.95 (variable episode lengths).
+
+## How to run (RunPod GPU)
+```bash
+git clone -b generalizable-rl https://github.com/BV2005/rl-nmopso-factory-patrol && cd rl-nmopso-factory-patrol
+python3 -m venv .venv && . .venv/bin/activate
+pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cu130 && pip install numpy scipy matplotlib pyyaml
+python scripts/test_generalizable.py --device cuda            # 23 checks
+python scripts/make_worlds.py --train 2000 --heldout 200 --ood 200 --sdf 3   # world pools (minutes)
+for p in 1 2 3 4; do                                          # phases (seed 1); add --seed 2, 3 for the paper
+  nohup python scripts/train_g.py --name vG_p${p}_seed1 --config configs/vG_p$p.yaml --seed 1 \
+        > results/runs/vG_p${p}_seed1_runner.out 2>&1 &
+done
+python scripts/eval_worlds.py --ckpt results/ckpt/vG_p4_seed1.pt \
+       --baselines results/ckpt/vS_seed1.pt,results/ckpt/vB_seed1.pt --worlds 50 --legs 16
+```
+The four phases fit on one RTX 5090 in parallel (each ~1–2 GB). The training log prints feasibility,
+crash rate, backtracks/climbs per leg, the mode mix and the PLR buffer size every `probe_every` iterations.
