@@ -79,12 +79,12 @@ def ray_table(world):
     """[ny, nx, RAY_DIRS] float32: from every unit cell centre (x, y = 0 .. mapsize), the distance along
     each global direction to the first drone-inflated cylinder or the map bounds, / RAY_MAX, capped at 1."""
     dev = world.threats.device
-    key = (id(world), str(dev))
-    if key in _RAY_TABLES:
-        return _RAY_TABLES[key]
     th = world.threats.detach().cpu()
     sig = hashlib.sha1(th.numpy().tobytes() + np.asarray(world.bounds).tobytes()
                        + f"{RAY_DIRS} {RAY_MAX} {DRONE}".encode()).hexdigest()[:12]
+    key = (sig, str(dev))              # by content: id(world) is reused once a world is freed
+    if key in _RAY_TABLES:
+        return _RAY_TABLES[key]
     cache = DATA / f"raytable_{sig}.pt"
     if cache.exists():
         _RAY_TABLES[key] = torch.load(cache, map_location="cpu").to(dev)
