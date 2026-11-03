@@ -27,7 +27,7 @@ import numpy as np
 import torch
 
 from . import sensors as S
-from .cost3d import TOP_INF, cost3d, segment_hits
+from .cost3d import TOP_INF, cost3d, segment_check, segment_hits
 from .env import BUDGET_PEN, F_SCALE, INFEASIBLE, S_MAX, SOFT_SCALE, sample_pref
 from .nmopso_cost import N_NODES
 from .scan3d import sim_scan_b, walls
@@ -58,7 +58,10 @@ class Domain:
     mount_sigma: float = 0.0          # m, sensor mounting height error
 
 
-DR = {0: Domain(), 1: Domain(zmax_local=(2.2, 3.0), exec_sigma=0.1, mount_sigma=0.03)}
+DR = {0: Domain(),
+      1: Domain(zmax_local=(2.2, 3.0), exec_sigma=0.1, mount_sigma=0.03),      # round 1 P4 (too strong)
+      2: Domain(zmax_local=(2.2, 3.0), exec_sigma=0.03, mount_sigma=0.03)}     # round 2: moderate
+EVAL = Domain(noise=False)            # evaluation: ideal sensors, no tracking error (as the baselines)
 
 
 # --- batches of levels ----------------------------------------------------------------------------------
@@ -97,7 +100,12 @@ def build_batch(items, device="cpu", dtype=torch.float64):
 # --- the environment -------------------------------------------------------------------------------------
 class GenEnv:
     def __init__(self, batch, pref, budget=None, modes="all", domain=Domain(), budget_pen=BUDGET_PEN, act_pen=0.02,
-                 wall_margin=1.0, generator=None):
+                 wall_margin=1.0, generator=None, wq=(1.0, 1.0, 1.0, 1.0), c_back=C_BACK, c_climb=C_CLIMB,
+                 c_prox=0.0, d_safe=0.5, max_back=MAX_BACK):
+        """wq: weights of F1..F4 in the scalarised terminal cost (round 2: path length, altitude and
+        smoothness count more); c_prox: per-step penalty c_prox * (1 - clearance / d_safe) for a step
+        that passes within d_safe of an obstacle (round 2: fewer crashes); c_back, c_climb, max_back:
+        costs and limit of the recovery modes."""
         self.b = batch
         legs = batch["legs"]
         dev, dt = legs.device, legs.dtype
@@ -111,6 +119,8 @@ class GenEnv:
         self.u = None if budget is None else torch.as_tensor(budget, dtype=dt, device=dev)
         self.modes, self.dom, self.budget_pen, self.act_pen = modes, domain, budget_pen, act_pen
         self.gen = generator
+        self.wq = torch.tensor(wq, dtype=dt, device=dev)
+        self.c_back, self.c_climb, self.c_prox, self.d_safe, self.max_back = c_back, c_climb, c_prox, d_safe, max_back
         h = batch["hall"]
         self.lo = torch.stack([h[:, 0] + wall_margin, h[:, 2] + wall_margin], -1)
         self.hi = torch.stack([h[:, 1] - wall_margin, h[:, 3] - wall_margin], -1)
@@ -166,7 +176,7 @@ class GenEnv:
         L[:, ADVANCE] = True
         if self.modes != "all":
             return L
-        L[:, BACK] = (self.k >= 1) & (self.backs < MAX_BACK)
+        L[:, BACK] = (self.k >= 1) & (self.backs < self.max_back)
         front = (S.bin_centres(self.dt, self.dev).abs() <= math.radians(30))[None]
         near = (ranges * S.SCAN_MAX < 3.0) & front
         from .scan3d import H_MAX
@@ -186,7 +196,7 @@ class GenEnv:
         mid, half = (ZBAND[0] + ZBAND[1]) / 2, (ZBAND[1] - ZBAND[0]) / 2
         core = torch.stack([gx / self.D, gy / self.D, g[:, 2], g[:, :2].norm(dim=-1) / (left.clamp_min(1) * self.rmax),
                             ((p[:, 2] - mid) / half).clamp(-5, 5), self.zmax_local - p[:, 2], left / N_NODES,
-                            torch.full_like(left, (T_DEC - self.t) / T_DEC), self.backs.to(self.dt) / MAX_BACK,
+                            torch.full_like(left, (T_DEC - self.t) / T_DEC), self.backs.to(self.dt) / max(self.max_back, 1),
                             torch.cos(hd - bear), torch.sin(hd - bear), self.D / 20], -1)
         r, h = self.scans()
         tabu = self.tabu[torch.arange(self.B, device=self.dev), self.k].to(self.dt)
@@ -233,7 +243,7 @@ class GenEnv:
         # backtrack: return to the previous node; flown twice
         if back.any():
             seg = (self.nodes[idx, self.k] - self.nodes[idx, (self.k - 1).clamp_min(0)]).norm(dim=-1)
-            rew = rew - torch.where(back, C_BACK * seg / self.D, torch.zeros_like(seg))
+            rew = rew - torch.where(back, self.c_back * seg / self.D, torch.zeros_like(seg))
             self.flown_back = self.flown_back + torch.where(back, seg, torch.zeros_like(seg))
             self.k = torch.where(back, self.k - 1, self.k)
             self.backs = self.backs + back.long()
@@ -249,9 +259,13 @@ class GenEnv:
             rew = rew - torch.where(move & was, torch.full_like(rew, C_TABU), torch.zeros_like(rew))
             rew = rew - torch.where(move, self.act_pen * a.pow(2).sum(-1), torch.zeros_like(rew))
             climbz = (q[:, 2] - ZBAND[1]).clamp_min(0)
-            rew = rew - torch.where(move, C_CLIMB * climbz, torch.zeros_like(rew))
+            rew = rew - torch.where(move, self.c_climb * climbz, torch.zeros_like(rew))
             self.n_climb = self.n_climb + (move & (mode == CLIMB)).long()
-            hit = segment_hits(self.cur, q, self.b["cyl"], self.b["cmask"]) & move
+            hit, margin = segment_check(self.cur, q, self.b["cyl"], self.b["cmask"])
+            hit = hit & move
+            if self.c_prox > 0:
+                near = (1 - margin / self.d_safe).clamp(0, 1)
+                rew = rew - torch.where(move & ~hit, self.c_prox * near, torch.zeros_like(rew))
             ok = move & ~hit
             nk = (self.k + 1).clamp(max=N_NODES)
             self.nodes[idx[ok], nk[ok]] = q[ok]
@@ -283,7 +297,7 @@ class GenEnv:
         F, viol, J2s = cost3d(P, n, self.b["cyl"], self.b["cmask"], ZBAND, details=True)
         feas = torch.isfinite(F).all(-1)
         Ff = F.nan_to_num(posinf=1e6)
-        s = (self.pref * Ff / F_SCALE.to(Ff)).sum(-1)
+        s = (self.pref * self.wq * Ff / F_SCALE.to(Ff)).sum(-1)
         if self.u is not None:
             s = s + self.budget_pen * (Ff[:, 1] - self.eps).clamp_min(0) / F_SCALE[1].item()
         s = S_MAX * torch.tanh(s / SOFT_SCALE)
