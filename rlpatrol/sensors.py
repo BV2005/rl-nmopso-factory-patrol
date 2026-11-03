@@ -224,7 +224,9 @@ def segment_clear(scan_obs, heading, direction, length, radius):
         lo, hi = c[k] - BIN / 2, c[k] + BIN / 2
         # the closest angular gap between the bin sector and the segment direction
         gap = 0.0 if lo <= rel <= hi else min(abs(rel - lo), abs(rel - hi))
-        if gap >= math.pi / 2:
+        if gap >= math.pi / 2:                     # beside / behind the start: only if it is within radius
+            if r[k] < radius:
+                return False
             continue
         # a return at range r[k] in that sector is within `radius` of the segment's line if
         # r sin(gap) < radius, and in front of the segment end if r cos(gap) < length + radius

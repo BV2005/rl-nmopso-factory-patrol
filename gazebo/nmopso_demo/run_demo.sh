@@ -22,6 +22,10 @@
 #                                           sensor-input policy (sensor_follower.py) instead of flown
 #                                           from the plan; transits as planned. BUDGET=0.6 threat budget,
 #                                           CLOUD_FRAME=optical if the depth points are z-forward
+#   MODEL=x500_patrol FOLLOWER=global_local GLOBAL_CKPT=results/ckpt/vB_seed1.pt nmopso_demo/run_demo.sh
+#                                           the planned track (global) + VFH+ local avoidance + global
+#                                           replanning with an obstacle memory (global_local_follower.py);
+#                                           ADAPTIVE_U=1: cautious budgets near freshly found obstacles
 #
 # worlds/factory.sdf is the factory2 world (= worlds/factory2.sdf of the repository) as given (it already has the magnetometer, IMU,
 # NavSat and air-pressure systems PX4 needs). PX4 is started like
@@ -39,6 +43,11 @@ LAPS="${LAPS:-1}"
 SPEED="${SPEED:-1.0}"
 MODEL="${MODEL:-x500}"                       # x500 (stock, GPS) | x500_patrol (sensor drone)
 SENSOR_CKPT="${SENSOR_CKPT:-}"               # a sensor_obs checkpoint: fly PATROL legs with sensor_follower.py
+FOLLOWER="${FOLLOWER:-}"                     # global_local: global_local_follower.py (needs GLOBAL_CKPT, x500_patrol)
+if [ "$FOLLOWER" = "global_local" ]; then
+    GLOBAL_CKPT="$(realpath "${GLOBAL_CKPT:?FOLLOWER=global_local needs GLOBAL_CKPT}")"
+    [ "$MODEL" = "x500_patrol" ] || { echo "[run_demo] FOLLOWER=global_local needs MODEL=x500_patrol"; exit 1; }
+fi
 if [ -n "$SENSOR_CKPT" ]; then
     SENSOR_CKPT="$(realpath "$SENSOR_CKPT")"
     [ "$MODEL" = "x500_patrol" ] || { echo "[run_demo] SENSOR_CKPT needs MODEL=x500_patrol"; exit 1; }
@@ -137,7 +146,13 @@ PIDS+=($RECORDER)
 FOLLOWERS=()
 for h in "${HOMES[@]}"; do
     read -r ID X Y <<< "$h"
-    if [ -n "$SENSOR_CKPT" ]; then
+    if [ "$FOLLOWER" = "global_local" ]; then
+        PYTHONPATH="$REPO/..:$DEMO${PYTHONPATH:+:$PYTHONPATH}" python3 "$DEMO/global_local_follower.py" --ros-args \
+            -p drone_id:="$ID" -p paths_file:="$PATHS" -p log_file:="$LOGS/trace_drone$ID.csv" -p laps:="$LAPS" \
+            -p speed:="$SPEED" -p global_ckpt:="$GLOBAL_CKPT" -p adaptive_u:="${ADAPTIVE_U:-0}" \
+            -p local:="${LOCAL:-vfh}" -p local_ckpt:="$(realpath "${LOCAL_CKPT:-$REPO/../results/ckpt/vS_seed1.pt}")" \
+            -p cloud_frame:="${CLOUD_FRAME:-flu}" > "$LOGS/follower_drone$ID.log" 2>&1 &
+    elif [ -n "$SENSOR_CKPT" ]; then
         PYTHONPATH="$REPO/..:$DEMO${PYTHONPATH:+:$PYTHONPATH}" python3 "$DEMO/sensor_follower.py" --ros-args \
             -p drone_id:="$ID" -p paths_file:="$PATHS" -p log_file:="$LOGS/trace_drone$ID.csv" -p laps:="$LAPS" \
             -p speed:="$SPEED" -p ckpt:="$SENSOR_CKPT" -p budget:="${BUDGET:-0.6}" \
