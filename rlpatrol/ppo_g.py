@@ -77,6 +77,9 @@ class ConfigG:
     d_safe: float = 0.5                # m
     noise_decay: bool = False          # anneal the exploration: log_std cap -> log_std_end, entropy bonus -> 0
     log_std_end: float = -2.2
+    # round 3
+    collision: str = "cyl"             # cyl: NMOPSO cylinder cover; box: boxes + box_margin (scan reports that zone)
+    box_margin: float = 0.5
 
 
 RESUMABLE = {"iters", "device", "threads", "ckpt_every", "snapshot_every", "probe_every"}
@@ -170,7 +173,9 @@ def level_episodes(world, n, legs_seed, p_extra, lmin, lmax):
     L = np.linalg.norm(legs[:, 3:5] - legs[:, :2], axis=1)
     put = (rng.random(n) < p_extra) & (L >= 3.0)
     for i in np.where(put)[0]:
-        extra[i] = unexpected_box(legs[i], rng)
+        b = unexpected_box(legs[i], rng)
+        if b is not None:
+            extra[i] = b
     return legs, extra
 
 
@@ -261,7 +266,7 @@ def env_options(cfg):
     return dict(modes=g("modes", "all"), budget_pen=g("budget_pen", 50.0), act_pen=g("act_pen", 0.02),
                 wq=(g("w_len", 1.0), 1.0, g("w_alt", 1.0), g("w_smooth", 1.0)), c_back=g("c_back", C_BACK),
                 c_climb=g("c_climb", C_CLIMB), c_prox=g("c_prox", 0.0), d_safe=g("d_safe", 0.5),
-                max_back=g("max_back", MAX_BACK))
+                max_back=g("max_back", MAX_BACK), collision=g("collision", "cyl"), box_margin=g("box_margin", 0.5))
 
 
 def rollout_g(actor, batch, pref, budget, cfg, deterministic=False, priv=True, generator=None, domain=None):

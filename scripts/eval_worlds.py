@@ -59,12 +59,27 @@ def eval_vg(actor, cfg, batch, domain):
     idx = torch.arange(B).repeat(len(U))
     pref = torch.tensor([BAL] * (B * len(U)), dtype=torch.float64)
     u = torch.tensor(np.repeat(U, B), dtype=torch.float64) if cfg["budget"] else None
-    _, env = rollout_g(actor, sub_batch(batch, idx), pref, u, cfg, deterministic=True, priv=False, domain=domain)
+    sb = sub_batch(batch, idx)
+    _, env = rollout_g(actor, sb, pref, u, cfg, deterministic=True, priv=False, domain=domain)
     feas = env.feasible.reshape(len(U), B)
     F = env.F[env.feasible]
+    Fn, fn = nmopso_rescore(env, sb)
+    fn = fn.reshape(len(U), B)
+    Fnf = Fn[fn.reshape(-1)]
     return dict(legs=B, success=feas.any(0).float().mean().item(), feasible=feas.float().mean().item(),
                 crash=env.crashed.float().mean().item(), backtracks=env.backs.float().mean().item(),
-                climbs=env.n_climb.float().mean().item(), F=F.mean(0).tolist() if len(F) else [float("nan")] * 4)
+                climbs=env.n_climb.float().mean().item(), F=F.mean(0).tolist() if len(F) else [float("nan")] * 4,
+                success_nmopso=fn.any(0).float().mean().item(), feasible_nmopso=fn.float().mean().item(),
+                F_nmopso=Fnf.mean(0).tolist() if len(Fnf) else [float("nan")] * 4)
+
+
+def nmopso_rescore(env, sb):
+    """F of the flown paths under NMOPSO's cylinder model (inf for crashed / infeasible ones), so a
+    box-model vG is judged by the same objectives as vS / vB; equal to env.F for cylinder-model vG."""
+    P, n = env.path()
+    Fn = cost3d(P, n, sb["cyl"], sb["cmask"], ZBAND)
+    Fn = torch.where(env.feasible[:, None], Fn, torch.full_like(Fn, float("inf")))
+    return Fn, torch.isfinite(Fn).all(-1)
 
 
 def eval_baseline(ck, worlds_legs, noise):
@@ -113,8 +128,9 @@ def vg_candidates(actor, cfg, batch, S, domain, chunk=8):
             idx = legs.repeat_interleave(C)
             pr = torch.tensor(np.tile(prefs, (n, 1)), dtype=torch.float64)
             bu = torch.tensor(np.tile(budgets, n), dtype=torch.float64) if budgets is not None else None
-            _, env = rollout_g(actor, sub_batch(batch, idx), pr, bu, cfg, deterministic=det, priv=False, domain=domain)
-            Fs.append(env.F.reshape(n, C, 4).numpy())
+            sb = sub_batch(batch, idx)
+            _, env = rollout_g(actor, sb, pr, bu, cfg, deterministic=det, priv=False, domain=domain)
+            Fs.append(nmopso_rescore(env, sb)[0].reshape(n, C, 4).numpy())     # NMOPSO objectives (comparable)
         F = np.concatenate(Fs, 1)
         for j, k in enumerate(legs.tolist()):
             ok = np.isfinite(F[j]).all(1)
@@ -198,7 +214,9 @@ def main():
             else:
                 print(f"  {k:14s} success {v['success']*100:5.1f} %  feasible {v['feasible']*100:5.1f} %"
                       + (f"  crash {v['crash']*100:4.1f} %  back {v['backtracks']:.2f}  climb {v['climbs']:.2f}" if "crash" in v else "")
-                      + f"  F {np.round(v['F'], 4).tolist()}", flush=True)
+                      + f"  F {np.round(v['F'], 4).tolist()}"
+                      + (f"  | NMOPSO model: success {v['success_nmopso']*100:5.1f} %  F {np.round(v['F_nmopso'], 4).tolist()}"
+                         if "success_nmopso" in v else ""), flush=True)
     tag = a.tag or (Path(a.ckpt).stem + ("_cand" if a.candidates else ""))
     p = ROOT / "results" / f"eval_g_{tag}.json"
     p.write_text(json.dumps(res, indent=1, default=str))
