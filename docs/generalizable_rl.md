@@ -165,3 +165,43 @@ python scripts/eval_worlds.py --ckpt results/ckpt/vG_p4_seed1.pt \
 ```
 The four phases fit on one RTX 5090 in parallel (each ~1–2 GB). The training log prints feasibility,
 crash rate, backtracks/climbs per leg, the mode mix and the PLR buffer size every `probe_every` iterations.
+
+---
+
+## Round 1 results (seed 1, quick protocol) and what they showed
+vG beat vS on unseen worlds (held-out success 73–75 % vs 67 %, OOD 78–79 % vs 72 %) and matched the map
+policy vB there; backtracking lifted factory2 blocked legs from 65 % (P1) to 76.5 % (P2). But its feasible
+paths were longer / less smooth (F1 0.11–0.34 vs 0.06–0.10), P3 drifted off the patrol band (J3 ≈ 0.48),
+15–27 % of rollouts crashed, training plateaued at ~80 % probe feasibility from ~700 iterations, and P3/P4
+added nothing. Also found: round 1's eval_worlds ran vG with its *training* domain randomisation (P4 with
+0.1 m tracking error, vG with sensor noise while vS/vB used ideal sensors) — an unfair comparison.
+
+## Round 2 (this commit)
+| Problem | Change | Where |
+|---|---|---|
+| long / jagged paths, altitude drift | `w_len`, `w_alt`, `w_smooth` weight F1, F3, F4 in the terminal cost (2.0) | `env_g.GenEnv(wq=...)`, `ConfigG` |
+| crashes | per-step proximity penalty `c_prox · (1 − clearance / d_safe)` (0.5, 0.5 m); exploration decay `noise_decay` (log-std cap → −2.2, entropy bonus → 0) | `cost3d.segment_check`, `env_g`, `ppo_g.train_g` |
+| backtracking as an escape | `c_back` 1.0, `max_back` 3 | `env_g`, `ConfigG` |
+| P4 domain randomisation too strong | `dr: 2` = 0.03 m tracking error (dr 1 unchanged for reproducibility) | `env_g.DR` |
+| unfair evaluation | every method evaluated with ideal sensors, no tracking error (`--eval_noise` for noise) | `env_g.EVAL`, `scripts/eval_worlds.py` |
+| not comparable to scripts/evaluate.py | `--candidates S`: 48 planner conditions × (1 + S) rollouts + straight path per leg, HV with `evaluate.hv`, for vG and the baselines | `scripts/eval_worlds.py` |
+| plateau at ~700 iterations | 1500 iterations | `configs/vG2*.yaml` |
+
+All round-2 options default to round 1's behaviour, so round-1 checkpoints load, resume and evaluate
+unchanged (re-evaluation is fairer now: no training noise). Configs: `configs/vG2.yaml` (main: P2 +
+fixes) and `configs/vG2_plr_dr.yaml` (+ PLR + dr 2). Tests: `scripts/test_generalizable.py`, 29 checks.
+
+```bash
+git pull
+python scripts/test_generalizable.py --device cuda                         # 29 checks
+for s in 1 2 3; do                                                         # main config, 3 seeds; and the variant
+  nohup python scripts/train_g.py --name vG2_seed$s --config configs/vG2.yaml --seed $s > results/runs/vG2_seed${s}_runner.out 2>&1 &
+done
+nohup python scripts/train_g.py --name vG2_plr_dr_seed1 --config configs/vG2_plr_dr.yaml --seed 1 > results/runs/vG2_plr_dr_seed1_runner.out 2>&1 &
+# fair quick protocol (vG round 1 + round 2, baselines once)
+python scripts/eval_worlds.py --ckpt results/ckpt/vG2_seed1.pt --baselines results/ckpt/vS_seed1.pt,results/ckpt/vB_seed1.pt
+for c in vG2_seed2 vG2_seed3 vG2_plr_dr_seed1 vG_p2_seed1; do python scripts/eval_worlds.py --ckpt results/ckpt/$c.pt; done
+# HV protocol (comparable to results/eval_<ckpt>_<legs>.json): factory2 legs + held-out worlds
+python scripts/eval_worlds.py --ckpt results/ckpt/vG2_seed1.pt --baselines results/ckpt/vS_seed1.pt,results/ckpt/vB_seed1.pt \
+       --candidates 3 --sets factory2_real,factory2_blocked,heldout --worlds 20 --legs 8
+```

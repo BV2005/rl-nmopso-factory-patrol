@@ -79,6 +79,12 @@ def cost3d(P, n_pts, cyl, cmask, zband=(1.6, 2.0), details=False):
 
 def segment_hits(a, b, cyl, cmask):
     """[B] bool: the segments a -> b (metres, [B, 3]) collide with a cylinder (3D rule of cost3d)."""
+    return segment_check(a, b, cyl, cmask)[0]
+
+
+def segment_check(a, b, cyl, cmask):
+    """(hit [B] bool, margin [B] metres): the collision of segment_hits and the smallest horizontal
+    clearance (distance - R - DRONE) to a cylinder the segment does not pass over (+inf if none)."""
     P = torch.stack([a, b], 1)
     U = P * UNITS
     c = cyl * UNITS
@@ -87,4 +93,7 @@ def segment_hits(a, b, cyl, cmask):
     t = torch.where(ee > 0, ((c[..., :2] - s) * e).sum(-1) / ee.clamp_min(1e-300), torch.zeros_like(ee)).clamp(0, 1)
     d = (s + t[..., None] * e - c[..., :2]).norm(dim=-1)
     zlow = torch.minimum(U[:, 0, 2], U[:, 1, 2])[:, None]
-    return ((d < c[..., 2] + DRONE) & (zlow - c[..., 3] - DRONE < 0) & cmask).any(-1)
+    below = (zlow - c[..., 3] - DRONE < 0) & cmask
+    hit = ((d < c[..., 2] + DRONE) & below).any(-1)
+    gap = torch.where(below, (d - c[..., 2] - DRONE) / UNITS, torch.full_like(d, math.inf))
+    return hit, gap.min(-1).values

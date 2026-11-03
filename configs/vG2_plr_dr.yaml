@@ -1,0 +1,26 @@
+# round 2 of the generalizable policy (docs/generalizable_rl.md, "Round 2"):
+# P2 (climb/backtrack, uniform worlds) + path-quality weights + proximity penalty + exploration decay +
+# stronger backtrack cost; vG2_plr_dr: plus PLR and moderate domain randomisation (dr 2)
+#   python scripts/train_g.py --name vG2_plr_dr_seed1 --config configs/vG2_plr_dr.yaml --seed 1
+iters: 1500
+batch: 8192
+minibatch: 8192
+budget: true
+budget_pen: 50.0
+act_pen: 0.02
+levels_per_iter: 64
+p_extra: 0.3
+modes: all
+w_len: 2.0
+w_alt: 2.0
+w_smooth: 2.0
+c_back: 1.0
+max_back: 3
+c_prox: 0.5
+d_safe: 0.5
+noise_decay: true
+log_std_end: -2.2
+device: cuda
+snapshot_every: 500
+plr: true
+dr: 2

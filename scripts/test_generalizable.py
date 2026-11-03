@@ -8,6 +8,9 @@
      termination within T_DEC, finite rewards
   5. PPO: rollout log-probs == recomputation; PLR prefers high-score levels; 3 training iterations
      (P2 and P3 settings) finite and resumable; eval_worlds on 2 worlds
+  6. round 2: defaults == round 1 (old checkpoints), proximity penalty near obstacles only, heavier
+     quality weights never improve the terminal reward, exploration decay caps the std, the
+     evaluation domain is noise-free, the candidate-set protocol (HV) runs
   python scripts/test_generalizable.py [--device cpu] [--batch 256]"""
 import argparse
 import json
@@ -193,6 +196,61 @@ def ppo_checks(dev, batch_n):
         (ROOT / "results" / "eval_g_selftest.json").unlink(missing_ok=True)
 
 
+def round2_checks(dev, batch_n):
+    print("[6] round 2")
+    from rlpatrol.env_g import DR, EVAL
+    from rlpatrol.ppo_g import env_options
+    old = {"modes": "all", "budget": True}                          # a round-1 cfg dict: no round-2 keys
+    o = env_options(old)
+    check(o["wq"] == (1.0, 1.0, 1.0, 1.0) and o["c_prox"] == 0.0 and o["max_back"] == 5,
+          "round-1 checkpoints keep round-1 rewards (defaults)")
+    check(EVAL.noise is False and EVAL.exec_sigma == 0 and DR[2].exec_sigma == 0.03 and DR[1].exec_sigma == 0.1,
+          "evaluation domain noise-free; dr 2 = moderate (0.03 m), dr 1 unchanged")
+    far = [[-30.3, -30, -30, 30, 10], [30, 30.3, -30, 30, 10], [-30, 30, -30.3, -30, 10], [-30, 30, 30, 30.3, 10]]
+    box = np.array([0.8, 1.2, 0.9, 1.3, 3.0])                       # beside the first step (cover ~0.2 m away), not on it
+    items = [(np.array([-30, 30, -30, 30.0]), np.array([box]), cylinders(box[None]), np.array([0, 0, 1.8, 6, 0, 1.8]), None),
+             (np.array([-30, 30, -30, 30.0]), np.zeros((0, 5)), np.zeros((0, 4)), np.array([0, 0, 1.8, 6, 0, 1.8]), None)]
+    b = build_batch(items, dev)
+    w = torch.tensor([[1 / 3, 0, 1 / 3, 1 / 3]] * 2, dtype=torch.float64)
+    u = torch.tensor([0.6, 0.6], dtype=torch.float64)
+    rs = []
+    for cp in (0.0, 0.5):
+        env = GenEnv(b, w, u, domain=EVAL, c_prox=cp, d_safe=1.0)
+        r, _ = env.step(torch.full((2,), ADVANCE), torch.zeros(2, 3))
+        rs.append(r)
+    near = (rs[0] - rs[1])
+    check(bool(near[0] > 1e-4) and abs(near[1].item()) < 1e-9 and not bool(env.crashed.any()),
+          f"proximity penalty for the step beside a box ({near[0].item():.3f}), none in the open")
+    W = [generate(s) for s in range(4)]
+    cfg = ConfigG(modes="all")
+    bb = batch_from_levels([{"world": i, "legs_seed": 30 + i} for i in range(4)], W, 16, cfg, dev)
+    ww, uu = sample_conditions(len(bb["legs"]), True, gen=torch.Generator().manual_seed(1))
+    term = []
+    for wq in ((1.0, 1.0, 1.0, 1.0), (2.0, 1.0, 2.0, 2.0)):
+        env = GenEnv(bb, ww, uu, domain=EVAL, wq=wq)
+        tot = torch.zeros(len(bb["legs"]), device=dev)
+        for t in range(T_DEC):
+            r, done = env.step(torch.full((len(bb["legs"]),), ADVANCE), torch.zeros(len(bb["legs"]), 3))
+            tot += r
+            if done:
+                break
+        term.append(tot)
+    check(bool((term[1] <= term[0] + 1e-9).all()), "heavier F1/F3/F4 weights never improve the terminal reward")
+    with tempfile.TemporaryDirectory() as d:
+        c = ConfigG(iters=3, batch=batch_n, minibatch=batch_n * 4, levels_per_iter=8, device=str(dev), probe_every=1,
+                    noise_decay=True, log_std_end=-2.2, c_prox=0.5, w_len=2.0, w_alt=2.0, w_smooth=2.0, c_back=1.0, max_back=3)
+        ck = Path(d) / "r2.pt"
+        actor, _, hist, _ = train_g(c, log=lambda s: None, ckpt=ck, worlds=W)
+        check(len(hist) == 3 and bool((actor.log_std <= -2.2 + 1e-6).all()),
+              f"round-2 training finite; exploration decayed to log_std {actor.log_std.max().item():.2f} at the end")
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "eval_worlds.py"), "--ckpt", str(ck), "--sets", "heldout",
+                            "--worlds", "1", "--legs", "2", "--candidates", "1", "--tag", "selftest_cand"],
+                           capture_output=True, text=True, cwd=ROOT)
+        ok = r.returncode == 0 and "HV" in r.stdout
+        check(ok, "candidate-set protocol (HV) runs" + ("" if ok else f": {r.stderr[-600:]}"))
+        (ROOT / "results" / "eval_g_selftest_cand.json").unlink(missing_ok=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--device", default="cpu")
@@ -206,6 +264,7 @@ def main():
     scan_checks(world)
     env_checks(dev, a.batch)
     ppo_checks(dev, a.batch)
+    round2_checks(dev, a.batch)
     print(f"all {len(OK)} checks passed")
 
 
