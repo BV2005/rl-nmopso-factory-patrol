@@ -85,7 +85,7 @@ def env_checks(dev):
         if done:
             break
     ratio = (env.time / env.t_st)
-    check(bool(env.success.all()) and bool(torch.allclose(ratio, torch.ones(3, dtype=torch.float64), atol=1e-9)),
+    check(bool(env.success.all()) and bool(torch.allclose(ratio, torch.ones(3, dtype=torch.float64, device=ratio.device), atol=1e-9)),
           f"straight flight in the open reaches the goal in exactly the straight-line time (ratio {ratio.tolist()})")
     P, n = env.path()
     m = flight_metrics(P, n, ob["boxes"], env.obst)
