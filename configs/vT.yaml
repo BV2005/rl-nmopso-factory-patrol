@@ -1,0 +1,21 @@
+# vT: the time-minimising, encoding-free leg planner (docs/time_optimal_rl.md).
+# Step-wise waypoints (0.4-1.5 m) until the goal, turn bound 45 deg per step and 45 deg per 0.5 m,
+# box collision model (obstacles + 0.5 m) with the margin-aware scan, objectives flight time / threat /
+# altitude-energy (preference-conditioned), climb and backtrack modes, clean legs.
+#   python scripts/train_t.py --name vT_seed1 --config configs/vT.yaml --seed 1
+iters: 1500
+batch: 8192
+minibatch: 16384
+levels_per_iter: 64
+p_extra: 0.3
+act_pen: 0.02
+c_prox: 0.5
+d_safe: 0.5
+box_margin: 0.5
+noise_decay: true
+log_std0: -1.0
+log_std_end: -2.2
+plr: false
+dr: 0
+device: cuda
+snapshot_every: 500
