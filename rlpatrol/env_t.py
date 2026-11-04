@@ -207,6 +207,8 @@ class TEnv:
         return -SHAPE * (self.goal - self.cur)[:, :2].norm(dim=-1) / self.D
 
     def _proposal(self, mode, a):
+        mode = mode.to(self.dev)                                                # callers may pass CPU tensors
+        a = a.to(device=self.dev, dtype=self.dt).clamp(-1, 1)
         p, hd = self.cur, self.heading
         r = R_MIN + (a[:, 0] + 1) / 2 * (R_MAX - R_MIN)
         lim = torch.clamp(KAPPA * r, max=TURN_MAX)
