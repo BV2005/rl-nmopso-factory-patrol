@@ -162,9 +162,10 @@ def review_fix_checks(dev):
             break
     check(bool(env.crashed.all()) and float(env.cur[0, 1]) < 1.4 - 0.5 + 1e-9,
           "steering into a hall wall's 0.5 m margin is a collision (no clamping); the drone stays outside the margin")
-    P = torch.tensor([[[0, 0, 1.8], [4, 1.2, 1.8], [8, 0, 1.8]]], dtype=torch.float64)
-    mw = flight_metrics(P, torch.tensor([3]), nb["boxes"], env.obst, walls=nb["kmask"] & ~env.obst)
-    mo = flight_metrics(P, torch.tensor([3]), nb["boxes"], env.obst)
+    P = torch.tensor([[[0, 0, 1.8], [4, 1.2, 1.8], [8, 0, 1.8]]], dtype=torch.float64, device=dev)
+    n3 = torch.tensor([3], device=dev)
+    mw = flight_metrics(P, n3, nb["boxes"], env.obst, walls=nb["kmask"] & ~env.obst)
+    mo = flight_metrics(P, n3, nb["boxes"], env.obst)
     check(bool(mw["collides"].all()) and not bool(mo["collides"].any()), "the judge: a path within 0.5 m of a wall collides")
 
 
