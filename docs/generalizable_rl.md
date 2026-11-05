@@ -244,3 +244,15 @@ python scripts/eval_worlds.py --ckpt results/ckpt/vG3_box_seed1.pt --baselines r
        --candidates 3 --sets factory2_real,factory2_blocked,heldout --worlds 20 --legs 8
 ```
 Note: all evaluations now use the clean legs, so re-evaluate vG2 / vS / vB on them (above) before comparing with round 3.
+
+## Review fixes (checkpoints trained before them must be retrained)
+1. **Heading after a backtrack**: the drone faces the direction it flew back in (`bearing(from, to)`), not the
+   heading it once arrived at the node with; the next step's 45° bound is relative to that.
+2. **No clamping to the hall**: steps used to be clamped to the hall after the turn bound was applied (bending
+   them); now a step that comes within `WALL_MARGIN` (0.5 m) of a hall wall is a collision.
+3. **Executed objectives**: `GenEnv.executed()` is the polyline of everything flown (start, every node incl.
+   backtrack returns, goal); the reward and feasibility use its cost (`F_exec`), the final route's cost is still
+   reported in `F` (and `eval_worlds` reports both, `F_exec` per set).
+4. **Walls**: seen by the scan and now also checked for collisions (`_wall_hit`); they stay out of the cost
+   model's obstacles (threat).
+Tests: `scripts/test_generalizable.py` section [8].
