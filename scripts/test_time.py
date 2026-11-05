@@ -3,6 +3,11 @@
   2. environment: turn bound and step length under random actions, straight flight in the open takes
      exactly the straight-line time, env time == judge time, collisions end the episode, backtracking
      restores the waypoint and costs time, observation shapes, legal modes
+  2b. review fixes: the flown turn per horizontal metre (judge on the executed polyline) stays within the
+     bound for whole random episodes; env time == judge time on the executed polyline with backtracks;
+     a backtrack = reversal yaw (4 T_TURN) + the flight back, heading = the direction flown back; reward
+     objectives are the executed flight's (F_exec), the route's are reported (F); steps are not clamped to
+     the hall (a step into a wall's margin collides) and the judge counts wall collisions
   3. PPO: rollout log-probs == recomputation, 3 training iterations, resume
   4. eval_t.py against vG, vS, vB on 2 held-out worlds and factory2's real legs
   python scripts/test_time.py [--device cpu] [--batch 128]"""
@@ -19,7 +24,7 @@ import torch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from rlpatrol.env_g import EVAL, build_batch  # noqa: E402
-from rlpatrol.env_t import (ADVANCE, BACK, CTX, KAPPA, OBS_BASE, PRIV, R_MAX, R_MIN, T_REVERSE, T_TURN, TURN_MAX,  # noqa: E402
+from rlpatrol.env_t import (ADVANCE, BACK, CTX, KAPPA, OBS_BASE, PRIV, R_MAX, R_MIN, T_MAX, T_TURN, TURN_MAX,  # noqa: E402
                             V_CRUISE, V_Z, TEnv, flight_metrics, sample_pref3, segment_time)
 from rlpatrol.ppo_g import ActorG, batch_from_levels, load_checkpoint  # noqa: E402
 from rlpatrol.ppo_t import ConfigT, make_actor_t, rollout_t, train_t  # noqa: E402
@@ -74,9 +79,12 @@ def env_checks(dev):
     a = torch.rand(B, 3, generator=g, dtype=torch.float64) * 2 - 1
     q, turn, r, snap = env._proposal(torch.full((B,), ADVANCE), a)
     free = ~snap
-    lim = torch.clamp(KAPPA * r, max=TURN_MAX)
-    check(bool(((turn.abs() <= lim + 1e-9) | snap).all()) and bool(((r >= R_MIN - 1e-9) & (r <= R_MAX + 1e-9))[free].all()),
-          f"turn bound |turn| <= min(45 deg, 45 deg / 0.5 m * step) and step in [{R_MIN}, {R_MAX}] m (random actions)")
+    p = env.cur
+    hl = (q - p)[:, :2].norm(dim=-1)
+    flown = torch.atan2(torch.sin(env._bearing(p, q) - env.heading), torch.cos(env._bearing(p, q) - env.heading))
+    lim = torch.clamp(KAPPA * hl, max=TURN_MAX)
+    check(bool((flown.abs() <= lim + 1e-9).all()) and bool(((r >= R_MIN - 1e-9) & (r <= R_MAX + 1e-9))[free].all()),
+          f"turn bound |flown turn| <= min(45 deg, 45 deg / 0.5 m * horizontal step) and step in [{R_MIN}, {R_MAX}] m (random actions)")
     legs = [[0, 0, 1.8, 7.3, 0, 1.8], [0, 0, 1.8, 0, 9.1, 1.8], [-3, 2, 1.8, 4, -5, 1.8]]
     ob = build_batch(open_items(legs), dev)
     env = TEnv(ob, torch.full((3, 3), 1 / 3, dtype=torch.float64), domain=EVAL)
@@ -87,7 +95,7 @@ def env_checks(dev):
     ratio = (env.time / env.t_st)
     check(bool(env.success.all()) and bool(torch.allclose(ratio, torch.ones(3, dtype=torch.float64, device=ratio.device), atol=1e-9)),
           f"straight flight in the open reaches the goal in exactly the straight-line time (ratio {ratio.tolist()})")
-    P, n = env.path()
+    P, n = env.executed()
     m = flight_metrics(P, n, ob["boxes"], env.obst)
     check(bool(torch.allclose(m["time_s"], env.time, atol=1e-9)), "env flight time == the judge's flight time (same path)")
     cb = build_batch(open_items([[0, 0, 1.8, 8, 0, 1.8]], [[3, 4, -1, 1, 3.0]]), dev)
@@ -106,8 +114,54 @@ def env_checks(dev):
     check(bool(L[:, BACK].all()), "after one waypoint: backtrack legal")
     env.step(torch.full((3,), BACK), torch.zeros(3, 3))
     seg = (p1 - env.cur).norm(dim=-1)
-    check(bool(torch.allclose(env.cur, ob["legs"][:, :3])) and bool(torch.allclose(env.time - t1, seg / V_CRUISE + T_REVERSE)),
-          "backtrack returns to the start and costs the flight back + T_REVERSE")
+    check(bool(torch.allclose(env.cur, ob["legs"][:, :3])) and bool(torch.allclose(env.time - t1, seg / V_CRUISE + 4 * T_TURN)),
+          "backtrack returns to the start and costs the reversal yaw (180 deg = 4 T_TURN) + the flight back")
+    back_dir = env._bearing(p1, env.cur)
+    check(bool(torch.allclose(env.heading, back_dir)), "after a backtrack the heading is the direction flown back")
+
+
+def review_fix_checks(dev):
+    print("[2b] review fixes (flown turn bound, executed objectives, walls)")
+    W = [generate(s) for s in range(4)]
+    b = batch_from_levels([{"world": i, "legs_seed": 30 + i} for i in range(4)], W, 32, ConfigT(), dev)
+    B = len(b["legs"])
+    env = TEnv(b, sample_pref3(B), domain=EVAL, generator=torch.Generator(device=dev).manual_seed(1))
+    g = torch.Generator().manual_seed(3)
+    for _ in range(T_MAX):
+        _, _, L = env.obs_pair(False)
+        mode = torch.multinomial(L.float().cpu(), 1, generator=g)[:, 0]
+        _, done = env.step(mode, torch.rand(B, 3, generator=g, dtype=torch.float64) * 2 - 1)
+        if done:
+            break
+    Pe, ne = env.executed()
+    m = flight_metrics(Pe, ne, b["boxes"], env.obst)
+    check(int(env.backs.sum()) > 0 and bool(torch.allclose(m["time_s"], env.time, atol=1e-9)),
+          f"random episodes ({int(env.backs.sum())} backtracks): env time == the judge's time on the executed polyline")
+    check(bool((m["turn_per_m"] <= KAPPA * (1 + 1e-9)).all()) and bool((m["max_turn"] <= TURN_MAX + 1e-9).all()),
+          f"flown turn per horizontal metre <= {math.degrees(KAPPA):.0f} deg/m and turns <= 45 deg on every executed path "
+          f"(max {math.degrees(m['turn_per_m'].max().item()):.0f} deg/m; backtrack reversals excluded)")
+    s = env.success
+    if s.any():
+        Pr, nr = env.path()
+        mr = flight_metrics(Pr, nr, b["boxes"], env.obst)
+        check(bool(torch.allclose(env.F_exec[s], m["F"][s])) and bool(torch.allclose(env.F[s], mr["F"][s])) and
+              bool((env.F_exec[s, 0] >= env.F[s, 0] - 1e-9).all()),
+              f"F_exec = the executed flight's objectives (rewarded), F = the route's (reported), F_exec time >= F time "
+              f"({int(s.sum())} successes)")
+    # walls: a narrow hall; steering into the wall collides (it used to be clamped silently)
+    hall = np.array([-30, 30, -1.4, 1.4])
+    nb = build_batch([(hall, np.zeros((0, 5)), np.zeros((0, 4)), np.array([0, 0, 1.8, 8, 0, 1.8]), None)], dev)
+    env = TEnv(nb, torch.full((1, 3), 1 / 3, dtype=torch.float64), domain=EVAL)
+    for _ in range(4):
+        _, done = env.step(torch.full((1,), ADVANCE), torch.tensor([[1.0, 1.0, 0.0]]))
+        if done:
+            break
+    check(bool(env.crashed.all()) and float(env.cur[0, 1]) < 1.4 - 0.5 + 1e-9,
+          "steering into a hall wall's 0.5 m margin is a collision (no clamping); the drone stays outside the margin")
+    P = torch.tensor([[[0, 0, 1.8], [4, 1.2, 1.8], [8, 0, 1.8]]], dtype=torch.float64)
+    mw = flight_metrics(P, torch.tensor([3]), nb["boxes"], env.obst, walls=nb["kmask"] & ~env.obst)
+    mo = flight_metrics(P, torch.tensor([3]), nb["boxes"], env.obst)
+    check(bool(mw["collides"].all()) and not bool(mo["collides"].any()), "the judge: a path within 0.5 m of a wall collides")
 
 
 def ppo_checks(dev, batch_n):
@@ -159,6 +213,7 @@ def main():
     dev = resolve_device(a.device)
     model_checks()
     env_checks(dev)
+    review_fix_checks(dev)
     ppo_checks(dev, a.batch)
     print(f"all {len(OK)} checks passed")
 

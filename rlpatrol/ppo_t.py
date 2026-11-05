@@ -35,7 +35,8 @@ class ConfigT:
     c_prox: float = 0.5
     d_safe: float = 0.5
     box_margin: float = 0.5
-    c_back_time: float = 1.0
+    c_back_time: float = 1.0          # unused since the review fix (a backtrack is timed by the time model); kept
+                                      # so old checkpoints' configs still load
     plr: bool = False
     p_new: float = 0.3
     plr_capacity: int = 4000
@@ -74,7 +75,7 @@ def make_critic_t(cfg):
 def env_options_t(cfg):
     g = lambda k, d: _get(cfg, k, d)  # noqa: E731
     return dict(act_pen=g("act_pen", 0.02), c_prox=g("c_prox", 0.5), d_safe=g("d_safe", 0.5),
-                box_margin=g("box_margin", 0.5), c_back_time=g("c_back_time", 1.0))
+                box_margin=g("box_margin", 0.5))
 
 
 def rollout_t(actor, batch, pref, cfg, deterministic=False, priv=True, generator=None, domain=None):
