@@ -163,3 +163,15 @@ python scripts/eval_t.py --ckpt results/ckpt/vT3_seed1_best.pt --vg results/ckpt
 for s in 2 3; do python scripts/eval_t.py --ckpt results/ckpt/vT3_seed${s}_best.pt --worlds 50 --legs 16 --threads 8; done
 tar czf results_vt3.tgz results/ckpt/vT3_seed* results/runs/vT3_seed* results/eval_t_vT3_*
 ```
+
+## vT3 results (3 seeds, validation-selected `_best.pt`: it 700 / 580 / 500; shared judge, same legs)
+| set | vT3 success (s1 / s2 / s3) | vT3 mean t/s, crash | vT2 it 500 (2 seeds) | vG4 (2 seeds) | vS | vB (full map) |
+|---|---|---|---|---|---|---|
+| held-out | **95.3** (95.7 / 94.5 / 95.6) | 1.36, 3.2 % | 90.6 | 87.9 | 89.5 · 1.32 | 91.3 · 1.19 |
+| OOD | **96.8** (97.3 / 96.5 / 96.7) | 1.19, 1.4 % | 95.5 | 93.5 | 94.1 · 1.29 | 95.7 · 1.14 |
+| factory2 real | **100** (100 / 100 / 100) | **1.11**, 0 % | 99.3 | 100 | 100 · 1.66 | 100 · 1.70 |
+| factory2 random | **97.5** (98.5 / 97.5 / 96.5) | 1.40, 1.5 % | 93.3 | 85.5 | 93.5 · 1.45 | 97.0 · 1.32 |
+| factory2 blocked | **94.5** (94.0 / 95.5 / 94.0) | 1.77, 3.5 % | 85.5 | 75.0 | 87.5 · 1.66 | 93.5 · 1.52 |
+Turn-rate violations 0 % on every set (vG4 10–59 %, vS 4.5–37 %, vB 2–38 %); with an unexpected box on the leg
+vT3 keeps 93.2 % (held-out) / 95.5 % (OOD). Time / straight is averaged over each method's own successes (vT3
+completes more of the hard legs); a paired comparison on the legs all methods complete is still to do.
