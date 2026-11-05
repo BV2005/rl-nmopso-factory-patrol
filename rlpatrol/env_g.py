@@ -236,6 +236,8 @@ class GenEnv:
 
     # --- dynamics ------------------------------------------------------------------------------------------
     def _proposal(self, mode, a):
+        mode = mode.to(self.dev)                                                # callers may pass CPU tensors
+        a = a.to(device=self.dev, dtype=self.dt)
         p, hd = self.cur, self.heading
         g = self.goal - p
         left = (N_NODES - self.k).clamp_min(1).to(self.dt)
