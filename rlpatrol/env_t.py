@@ -32,9 +32,19 @@ ranks paths, it is not a flight-time prediction. Validate against PX4 SITL (logg
 quoting absolute times. Planning time is not an objective (one network pass per decision, ~constant): it is
 measured by scripts/eval_t.py.
 
-Reward: terminal -S_MAX tanh(w . F / SCALE / (4 S_MAX)) on success, -(FAIL + remaining distance / leg) on
-a collision or a timeout; per step a potential shaping on the distance to the goal (return-neutral), a
-proximity penalty c_prox (1 - clearance / d_safe), -C_TABU for a tabu direction.
+Reward (w = preference over time, threat, altitude; sums to 1):
+  time      per step -C_TIME w_time (min(t / t_straight, T_CAP) after - before): the flight time of the step
+            itself (turns and backtrack reversals included), so the episode's time charge is exactly
+            C_TIME w_time min(executed time / straight time, T_CAP); credited where it is spent
+  success   +SUCC - min(C_Q sum_{threat, alt} w_i F_i / SCALE_i, Q_MAX) (executed flight's objectives; linear,
+            no squashing)
+  failure   collision or timeout: -FAIL - the rest of the time cap (C_TIME w_time (T_CAP - min(t / t_st, T_CAP))),
+            so every failure pays the full time charge and crashing early is never cheaper than flying slowly;
+            any success beats any failure by >= FAIL + SUCC - Q_MAX (minus the small per-step penalties)
+  per step  potential shaping on the distance to the goal (return-neutral, +SHAPE in total on success), a
+            proximity penalty c_prox (1 - clearance / d_safe) (obstacles and walls), -C_TABU for a tabu
+            direction, a small action penalty
+The terms are accumulated per episode (r_time, r_prox, r_term) and logged by ppo_t.
 Observation (egocentric): goal in the heading frame, distance and height to the goal, height in the band,
 headroom, decisions / backtracks left, heading vs goal bearing, the last turn and step, the range scan,
 the height scan, the tabu mask, the legal modes, then the preference w (3)."""
@@ -58,7 +68,10 @@ T_TURN = 0.5                           # s per 45 deg of turn (also the hover ya
 MAX_BACK = 3
 C_TABU = 0.1
 FAIL = 6.0
-S_MAX = 5.0
+SUCC = 2.0                             # success bonus
+C_TIME = 6.0                           # per unit of time / straight time at w_time = 1 (2 at the mean w = 1/3)
+T_CAP = 3.0                            # time charged up to 3x the straight-line time (a failure pays all of it)
+C_Q, Q_MAX = 1.0, 4.0                  # threat + altitude cost on success, capped (SUCC + FAIL > Q_MAX)
 SHAPE = 1.0
 SCALE_T = torch.tensor([0.5, 0.1, 0.3], dtype=torch.float64)       # typical F_time, F_threat, F_alt
 NB = S.SCAN_BINS
@@ -140,7 +153,7 @@ def flight_metrics(P, n, boxes, kmask, margin=BOX_MARGIN, zband=ZBAND, walls=Non
 
 class TEnv:
     def __init__(self, batch, pref, domain=Domain(), act_pen=0.02, c_prox=0.5, d_safe=0.5, box_margin=BOX_MARGIN,
-                 generator=None):
+                 generator=None, c_time=C_TIME, t_cap=T_CAP, succ=SUCC, fail=FAIL, c_q=C_Q, q_max=Q_MAX):
         self.b = batch
         legs = batch["legs"]
         dev, dt = legs.device, legs.dtype
@@ -151,6 +164,7 @@ class TEnv:
         self.t_st = self.D / V_CRUISE
         self.pref = pref.to(device=dev, dtype=dt)
         self.dom, self.act_pen, self.c_prox, self.d_safe, self.margin = domain, act_pen, c_prox, d_safe, box_margin
+        self.c_time, self.t_cap, self.succ, self.fail, self.c_q, self.q_max = c_time, t_cap, succ, fail, c_q, q_max
         self.obst = batch["kmask"].clone()
         self.obst[:, -4:] = False                       # obstacles (threat); the hall walls are not
         self.walls = torch.zeros_like(batch["kmask"])
@@ -175,6 +189,9 @@ class TEnv:
         self.alive = torch.ones(B, dtype=torch.bool, device=dev)
         self.success = torch.zeros(B, dtype=torch.bool, device=dev)
         self.crashed = torch.zeros(B, dtype=torch.bool, device=dev)
+        self.r_time = torch.zeros(B, dtype=dt, device=dev)                     # reward terms per episode (logged)
+        self.r_prox = torch.zeros(B, dtype=dt, device=dev)
+        self.r_term = torch.zeros(B, dtype=dt, device=dev)
         self.F = torch.full((B, 3), math.inf, dtype=dt, device=dev)            # of the final route (reported)
         self.F_exec = torch.full((B, 3), math.inf, dtype=dt, device=dev)       # of the flight (rewarded)
         self.ex = torch.zeros(B, T_MAX + 2, 3, dtype=dt, device=dev)           # executed polyline: start and
@@ -239,6 +256,14 @@ class TEnv:
     def _potential(self):
         return -SHAPE * (self.goal - self.cur)[:, :2].norm(dim=-1) / self.D
 
+    def _tcharge(self, t):
+        """cumulative time charge of flight time t [B]: C_TIME w_time min(t / t_straight, T_CAP)."""
+        return self.c_time * self.pref[:, 0] * (t / self.t_st).clamp(max=self.t_cap)
+
+    def _fail_pen(self):
+        """[B] failure penalty: FAIL + the rest of the time cap."""
+        return self.fail + self._tcharge(torch.full_like(self.time, math.inf)) - self._tcharge(self.time)
+
     def _proposal(self, mode, a):
         mode = mode.to(self.dev)                                                # callers may pass CPU tensors
         a = a.to(device=self.dev, dtype=self.dt).clamp(-1, 1)
@@ -270,6 +295,7 @@ class TEnv:
         mode = torch.where(self.alive, mode, torch.full_like(mode, ADVANCE))
         idx = torch.arange(self.B, device=self.dev)
         phi0 = self._potential()
+        t0 = self.time.clone()
         rew = torch.zeros(self.B, dtype=self.dt, device=self.dev)
         back = self.alive & (mode == BACK) & (self.k >= 1)
         move = self.alive & ~back
@@ -299,7 +325,9 @@ class TEnv:
             rew = rew - torch.where(move & ~snap, self.act_pen * a.pow(2).sum(-1), torch.zeros_like(rew))
             hit, clear = segment_check_box(self.cur, q, self.b["boxes"], self.coll, self.margin)
             hit = hit & move
-            rew = rew - torch.where(move & ~hit, self.c_prox * (1 - clear / self.d_safe).clamp(0, 1), torch.zeros_like(rew))
+            px = torch.where(move & ~hit, self.c_prox * (1 - clear / self.d_safe).clamp(0, 1), torch.zeros_like(rew))
+            rew = rew - px
+            self.r_prox = self.r_prox + px
             ok = move & ~hit
             # the flown turn (differs from `turn` only by the execution noise), timed from the second executed
             # segment on (the first leaves the start in whatever direction the drone faces), as flight_metrics
@@ -318,20 +346,27 @@ class TEnv:
             self._push_exec(ok, q)
             reached = ok & snap
             if hit.any():
-                rem = (self.goal - self.cur)[:, :2].norm(dim=-1) / self.D
-                rew = rew - torch.where(hit, FAIL + rem.clamp(max=3), torch.zeros_like(rew))
+                fp = torch.where(hit, self._fail_pen(), torch.zeros_like(rew))
+                rew = rew - fp
+                self.r_term = self.r_term - fp
                 self.crashed |= hit
                 self.alive &= ~hit
+        tc = self._tcharge(self.time) - self._tcharge(t0)                      # this step's flight time
+        rew = rew - tc
+        self.r_time = self.r_time + tc
         self.t += 1
         rew = rew + torch.where(self.alive & ~reached, self._potential() - phi0, -phi0 * self.alive)   # Phi(end) = 0
         if reached.any():
-            rew = rew + torch.where(reached, self._terminal(reached), torch.zeros_like(rew))
+            tr = torch.where(reached, self._terminal(reached), torch.zeros_like(rew))
+            rew = rew + tr
+            self.r_term = self.r_term + tr
             self.success |= reached
             self.alive &= ~reached
         timeout = self.alive & (self.t >= T_MAX)
         if timeout.any():
-            rem = (self.goal - self.cur)[:, :2].norm(dim=-1) / self.D
-            rew = rew - torch.where(timeout, FAIL + rem.clamp(max=3), torch.zeros_like(rew))
+            fp = torch.where(timeout, self._fail_pen(), torch.zeros_like(rew))
+            rew = rew - fp
+            self.r_term = self.r_term - fp
             self.alive &= ~timeout
         return rew.float(), not bool(self.alive.any())
 
@@ -355,8 +390,8 @@ class TEnv:
         Pe, ne = self.executed()
         F = flight_metrics(Pe, ne, self.b["boxes"], self.obst, self.margin)["F"]   # time == self.time / t_st - 1
         self.F_exec = torch.where(mask[:, None], F, self.F_exec)
-        s = (self.pref * F / SCALE_T.to(F)).sum(-1)
-        return -S_MAX * torch.tanh(s / (4 * S_MAX))
+        q = (self.pref[:, 1:] * F[:, 1:] / SCALE_T[1:].to(F)).sum(-1)              # time is charged per step
+        return self.succ - (self.c_q * q).clamp(max=self.q_max)
 
 
 def sample_pref3(B, gen=None):

@@ -12,6 +12,13 @@ act_pen: 0.02
 c_prox: 0.5
 d_safe: 0.5
 box_margin: 0.5
+# reward (rlpatrol/env_t.py docstring): dense time cost, linear success term, failure pays the full time cap
+c_time: 6.0
+t_cap: 3.0
+succ: 2.0
+fail: 6.0
+c_q: 1.0
+q_max: 4.0
 noise_decay: true
 log_std0: -1.0
 log_std_end: -2.2
