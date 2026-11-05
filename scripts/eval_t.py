@@ -46,9 +46,14 @@ def obstacles(batch):
     return m
 
 
+def walls(batch):
+    return batch["kmask"] & ~obstacles(batch)
+
+
 def judge(P, n, batch, reached):
-    """the common metrics of paths P [B, N, 3] (n points) that `reached` the goal."""
-    m = flight_metrics(P, n, batch["boxes"], obstacles(batch))
+    """the common metrics of the flown paths P [B, N, 3] (n points; backtracks included) that `reached` the goal;
+    a path through an obstacle's or a wall's margin collides."""
+    m = flight_metrics(P, n, batch["boxes"], obstacles(batch), walls=walls(batch))
     ok = reached & ~m["collides"]
     tr = m["time_s"] / m["straight_s"]
     f = lambda x: float(x[ok].mean()) if ok.any() else float("nan")  # noqa: E731
@@ -75,7 +80,7 @@ def run_vt(actor, cfg, batch):
     B = len(batch["legs"])
     pref = torch.full((B, 3), 1 / 3, dtype=torch.float64)
     _, env = rollout_t(actor, batch, pref, cfg, deterministic=True, priv=False, domain=EVAL)
-    P, n = env.path()
+    P, n = env.executed()
     r = judge(P, n, batch, env.success)
     r.update(crash=float(env.crashed.float().mean()), timeout=float((~env.success & ~env.crashed).float().mean()),
              backtracks=float(env.backs.float().mean()), climbs=float(env.n_climb.float().mean()),
@@ -89,7 +94,7 @@ def run_vg(actor, cfg, batch):
     pref = torch.tensor([[1 / 3, 0, 1 / 3, 1 / 3]] * B, dtype=torch.float64)
     u = torch.full((B,), 0.6, dtype=torch.float64) if cfg.get("budget", True) else None
     _, env = rollout_g(actor, batch, pref, u, cfg, deterministic=True, priv=False, domain=EVAL)
-    P, n = env.path()
+    P, n = env.executed()
     r = judge(P, n, batch, ~env.crashed)
     r.update(crash=float(env.crashed.float().mean()), backtracks=float(env.backs.float().mean()))
     r["plan_ms"] = timed(lambda: rollout_g(actor, one(batch, 0), pref[:1], None if u is None else u[:1], cfg,

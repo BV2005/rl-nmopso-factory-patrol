@@ -12,7 +12,7 @@ a leg takes and how safely it is flown.
 |---|---|---|
 | path | 10 nodes, step ≤ 0.3 × leg, ≤ 45° per node | waypoints until the goal (≤ 60 decisions), step 0.4–1.5 m (absolute), turn ≤ min(45°, 45° per 0.5 m) |
 | objectives | F1 length, F2 threat (budget), F3 altitude, F4 smoothness | **flight time**, threat, altitude + climb energy (preference over 3) |
-| time model | — | per segment max(horizontal / 1 m/s, vertical / 0.5 m/s) + 0.5 s per 45° of turn; backtrack = fly back + 1.5 s |
+| time model | — | per segment max(horizontal / 1 m/s, vertical / 0.5 m/s) + 0.5 s per 45° of turn; backtrack = 180° hover yaw (2 s) + fly back |
 | collision | box + 0.5 m (vG3_box) | box + 0.5 m, scan ranges to that zone |
 | recovery | climb, backtrack | climb, backtrack, final approach (goal within 1.5 m, inside the turn bound, clear → fly to it) |
 | planning time | measured | measured, not optimised (one network pass per decision: ~constant) |
@@ -34,6 +34,27 @@ reaches the goal with no collision in the box model; flight time (and time / str
 threat, altitude, the largest turn and turn-rate violations (turn per metre above the bound); plus the
 method's planning time per leg on the same CPU. NMOPSO's own HV is no longer the yardstick for vT (different
 objectives); flight outcomes are.
+
+## Review fixes (after the first vT results; checkpoints trained before them must be retrained)
+1. **Heading after a backtrack**: the drone faces the direction it flew back in (it used to keep the heading it
+   once arrived with). The reversal is a real hover yaw, timed by the time model (180° = 2 s; `T_REVERSE` is
+   gone), so the env's flight time equals `flight_metrics` on what was flown, backtracks included.
+2. **Turn bound on the horizontal step**: |turn| ≤ min(45°, 45° per 0.5 m × horizontal step length), the length
+   the judge divides by (a climbing step used to get the 3D length's larger bound); the final approach uses the
+   same bound (it used to allow `KAPPA × max(d, R_MIN)`). Steps are no longer clamped to the hall, which bent
+   them after the bound was applied.
+3. **Executed objectives**: the reward scores the executed polyline (`TEnv.executed()`: every waypoint flown to,
+   backtrack returns included; `F_exec`); the final route's objectives are reported in `F`. `eval_t.py` judges
+   every method's executed flight (vT, vG) — backtrack reversals are timed but left out of the turn-rate check
+   (`reversals()`: a stop-and-yaw, not a flown curve).
+4. **Walls**: the hall walls are collisions with the same 0.5 m margin (the scan always saw them; the clamp
+   used to hide them), in the env and in the judge (`flight_metrics(..., walls=)`). Threat counts obstacles only.
+5. **Time model limits**: constant speeds, no acceleration / braking / jerk limits, a fixed time per degree of
+   turn (no speed-dependent radius), no wind, battery or controller lag. It ranks paths; it does not predict
+   flight time. Validate against PX4 SITL (logged setpoint tracking) before quoting absolute times.
+
+Tests: `scripts/test_time.py` section [2b] (flown turn bound on whole random episodes, env time == judge time
+with backtracks, reversal time and heading, F_exec vs F, wall collisions in env and judge).
 
 ## Files
 `rlpatrol/env_t.py` (time model, judge, TEnv), `rlpatrol/ppo_t.py` (ConfigT, rollout_t, train_t; reuses
