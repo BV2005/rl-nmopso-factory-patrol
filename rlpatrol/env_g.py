@@ -257,7 +257,7 @@ class GenEnv:
 
     def _wall_hit(self, a, b):
         """[B] bool: segment a -> b comes within WALL_MARGIN of a hall wall."""
-        return segment_check_box(a, b, self.b["boxes"], self.walls, WALL_MARGIN)[0]
+        return segment_check_box(a.to(self.dev, self.dt), b.to(self.dev, self.dt), self.b["boxes"], self.walls, WALL_MARGIN)[0]
 
     def _push_exec(self, mask, p):
         idx = torch.arange(self.B, device=self.dev)[mask]
