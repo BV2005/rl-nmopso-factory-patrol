@@ -35,6 +35,7 @@ from .worldgen import cylinders
 
 T_DEC = 20
 MAX_BACK = 5
+WALL_MARGIN = 0.5      # m: a step within this of a hall wall is a collision (no silent clamping, review fix)
 ZBAND = (1.6, 2.0)
 SIG_R, YAW_MAX, TURN = 1.0, math.pi / 2, math.pi / 4
 C_BACK, C_CLIMB, C_TABU = 0.5, 0.2, 0.1
@@ -111,7 +112,9 @@ class GenEnv:
             raise ValueError(f"collision must be cyl or box, not {collision!r}")
         self.collision, self.box_margin = collision, box_margin
         self.obst = batch["kmask"].clone()
-        self.obst[:, -4:] = False                                              # the hall walls are not obstacles
+        self.obst[:, -4:] = False              # obstacles for the cost model; the hall walls are not obstacles there
+        self.walls = torch.zeros_like(batch["kmask"])
+        self.walls[:, -4:] = True              # ... but they are seen by the scan and a step into them collides
         self.b = batch
         legs = batch["legs"]
         dev, dt = legs.device, legs.dtype
@@ -127,9 +130,6 @@ class GenEnv:
         self.gen = generator
         self.wq = torch.tensor(wq, dtype=dt, device=dev)
         self.c_back, self.c_climb, self.c_prox, self.d_safe, self.max_back = c_back, c_climb, c_prox, d_safe, max_back
-        h = batch["hall"]
-        self.lo = torch.stack([h[:, 0] + wall_margin, h[:, 2] + wall_margin], -1)
-        self.hi = torch.stack([h[:, 1] - wall_margin, h[:, 3] - wall_margin], -1)
         self.zmax_local = self._uniform(*domain.zmax_local)
         self.mount = torch.randn(B, dtype=dt, device=dev, generator=generator) * domain.mount_sigma
         self.spec = S.SensorSpec(noise=domain.noise)
@@ -145,8 +145,12 @@ class GenEnv:
         self.crashed = torch.zeros(B, dtype=torch.bool, device=dev)
         self.flown_back = torch.zeros(B, dtype=dt, device=dev)
         self.n_climb = torch.zeros(B, dtype=torch.long, device=dev)
-        self.F = torch.full((B, 4), math.inf, dtype=dt, device=dev)
+        self.F = torch.full((B, 4), math.inf, dtype=dt, device=dev)            # of the final route
+        self.F_exec = torch.full((B, 4), math.inf, dtype=dt, device=dev)       # of everything flown (incl. backtracks)
         self.feasible = torch.zeros(B, dtype=torch.bool, device=dev)
+        self.ex = torch.zeros(B, T_DEC + 3, 3, dtype=dt, device=dev)           # executed polyline: start, every
+        self.ex[:, 0] = self.start                                             # node flown to (incl. returns)
+        self.nex = torch.ones(B, dtype=torch.long, device=dev)
         if self.u is not None:                                                 # the straight path's threat
             s = torch.linspace(0, 1, N_NODES + 2, dtype=dt, device=dev)[None, :, None]
             Pst = self.start[:, None] + s * (self.goal - self.start)[:, None]
@@ -245,8 +249,18 @@ class GenEnv:
         dz = (zt - p[:, 2]).clamp(-r * 0.999, r * 0.999)                        # climb angle <= 45 deg
         hor = torch.sqrt((r ** 2 - dz ** 2).clamp_min(0))
         q = torch.stack([p[:, 0] + hor * torch.cos(yaw), p[:, 1] + hor * torch.sin(yaw), p[:, 2] + dz], -1)
-        q[:, :2] = torch.minimum(torch.maximum(q[:, :2], self.lo), self.hi)
+        # no clamping to the hall (it bent the step after the turn bound was applied): a step that comes
+        # within WALL_MARGIN of a wall is a collision instead (_wall_hit)
         return q, d
+
+    def _wall_hit(self, a, b):
+        """[B] bool: segment a -> b comes within WALL_MARGIN of a hall wall."""
+        return segment_check_box(a, b, self.b["boxes"], self.walls, WALL_MARGIN)[0]
+
+    def _push_exec(self, mask, p):
+        idx = torch.arange(self.B, device=self.dev)[mask]
+        self.ex[idx, self.nex[mask]] = p[mask]
+        self.nex = self.nex + mask.long()
 
     def step(self, mode, a):
         """mode [B] long, a [B, 3] in [-1, 1] -> reward [B] float32, done (all episodes finished)."""
@@ -259,11 +273,16 @@ class GenEnv:
         back = self.alive & (mode == BACK) & (self.k >= 1)
         # backtrack: return to the previous node; flown twice
         if back.any():
+            frm = self.cur.clone()
             seg = (self.nodes[idx, self.k] - self.nodes[idx, (self.k - 1).clamp_min(0)]).norm(dim=-1)
             rew = rew - torch.where(back, self.c_back * seg / self.D, torch.zeros_like(seg))
             self.flown_back = self.flown_back + torch.where(back, seg, torch.zeros_like(seg))
             self.k = torch.where(back, self.k - 1, self.k)
             self.backs = self.backs + back.long()
+            # the drone now faces the direction it flew back in (B -> A), not the heading it once arrived with
+            moved = back & ((self.cur - frm)[:, :2].norm(dim=-1) > 1e-9)
+            self.head[idx[moved], self.k[moved]] = self._bearing(frm, self.cur)[moved]
+            self._push_exec(back, self.cur)
         # advance / climb
         if move.any():
             q, d = self._proposal(mode, a)
@@ -279,7 +298,7 @@ class GenEnv:
             rew = rew - torch.where(move, self.c_climb * climbz, torch.zeros_like(rew))
             self.n_climb = self.n_climb + (move & (mode == CLIMB)).long()
             hit, margin = self._check(self.cur, q)
-            hit = hit & move
+            hit = (hit | self._wall_hit(self.cur, q)) & move
             if self.c_prox > 0:
                 near = (1 - margin / self.d_safe).clamp(0, 1)
                 rew = rew - torch.where(move & ~hit, self.c_prox * near, torch.zeros_like(rew))
@@ -289,6 +308,7 @@ class GenEnv:
             self.head[idx[ok], nk[ok]] = self._bearing(self.cur, q)[ok]
             self.tabu[idx[ok], nk[ok]] = False
             self.k = torch.where(ok, nk, self.k)
+            self._push_exec(ok, self.cur)
             crash = hit
             if crash.any():
                 rew = rew - torch.where(crash, torch.full_like(rew, INFEASIBLE + 3.0), torch.zeros_like(rew))
@@ -309,17 +329,27 @@ class GenEnv:
         P[idx, self.k + 1] = self.goal
         return P, self.k + 2
 
+    def executed(self):
+        """packed [B, T_DEC + 3, 3] executed polyline (start, every node flown to incl. returns, goal), n [B]."""
+        P = self.ex.clone()
+        idx = torch.arange(self.B, device=self.dev)
+        P[idx, self.nex] = self.goal
+        return P, self.nex + 1
+
     def _terminal(self):
         P, n = self.path()
-        F, viol, J2s = self._cost(P, n, details=True)
-        feas = torch.isfinite(F).all(-1)
-        Ff = F.nan_to_num(posinf=1e6)
+        F = self._cost(P, n)                                                   # the final route (reported)
+        Pe, ne = self.executed()
+        Fe, viol, J2s = self._cost(Pe, ne, details=True)                       # what was flown (rewarded)
+        feas = torch.isfinite(F).all(-1) & torch.isfinite(Fe).all(-1)
+        Ff = Fe.nan_to_num(posinf=1e6)
         s = (self.pref * self.wq * Ff / F_SCALE.to(Ff)).sum(-1)
         if self.u is not None:
             s = s + self.budget_pen * (Ff[:, 1] - self.eps).clamp_min(0) / F_SCALE[1].item()
         s = S_MAX * torch.tanh(s / SOFT_SCALE)
         upd = self.alive & ((self.k >= N_NODES) | (self.t >= T_DEC))
         self.F = torch.where(upd[:, None], F, self.F)
+        self.F_exec = torch.where(upd[:, None], Fe, self.F_exec)
         self.feasible = torch.where(upd, feas, self.feasible)
         return torch.where(feas, -s, -(INFEASIBLE + viol.clamp(max=3.0)))
 

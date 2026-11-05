@@ -63,12 +63,14 @@ def eval_vg(actor, cfg, batch, domain):
     _, env = rollout_g(actor, sb, pref, u, cfg, deterministic=True, priv=False, domain=domain)
     feas = env.feasible.reshape(len(U), B)
     F = env.F[env.feasible]
+    Fx = env.F_exec[env.feasible] if hasattr(env, "F_exec") else F
     Fn, fn = nmopso_rescore(env, sb)
     fn = fn.reshape(len(U), B)
     Fnf = Fn[fn.reshape(-1)]
     return dict(legs=B, success=feas.any(0).float().mean().item(), feasible=feas.float().mean().item(),
                 crash=env.crashed.float().mean().item(), backtracks=env.backs.float().mean().item(),
                 climbs=env.n_climb.float().mean().item(), F=F.mean(0).tolist() if len(F) else [float("nan")] * 4,
+                F_exec=Fx.mean(0).tolist() if len(Fx) else [float("nan")] * 4,
                 success_nmopso=fn.any(0).float().mean().item(), feasible_nmopso=fn.float().mean().item(),
                 F_nmopso=Fnf.mean(0).tolist() if len(Fnf) else [float("nan")] * 4)
 
