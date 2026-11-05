@@ -175,3 +175,19 @@ tar czf results_vt3.tgz results/ckpt/vT3_seed* results/runs/vT3_seed* results/ev
 Turn-rate violations 0 % on every set (vG4 10–59 %, vS 4.5–37 %, vB 2–38 %); with an unexpected box on the leg
 vT3 keeps 93.2 % (held-out) / 95.5 % (OOD). Time / straight is averaged over each method's own successes (vT3
 completes more of the hard legs); a paired comparison on the legs all methods complete is still to do.
+
+### Paired flight time (`eval_t.py` now stores per-leg results and prints `paired:`)
+Time / straight on the same legs, 3 vT3 seeds (`results/eval_t_vT3_seed*_paired.json`), vT3 − other on the legs
+both complete (median; share of those legs vT3 flies faster; share where vT3 is > 0.3 slower):
+| set | vs vS | vs vB (full map) | vs vG4 |
+|---|---|---|---|
+| held-out | −0.115; 96 %; 1.7 % | −0.034; 88 %; 2.9 % | mean −0.175; 97 % |
+| OOD | −0.103; 97 %; 1.0 % | −0.021; 83 %; 2.3 % | mean −0.186; 98 % |
+| factory2 real | −0.297; 93 %; 0.5 % | −0.250; 97 %; 0.5 % | mean −0.52; 97 % |
+| factory2 random | −0.137; 94 %; 3.8 % | −0.052; 82 %; 7.2 % | mean −0.29; 97 % |
+| factory2 blocked | −0.150; 84 %; 8.9 % | −0.054; 70 %; 15.4 % | mean −0.18; 88 % |
+On the legs every method completes (691 / 800 held-out, 741 / 800 OOD, 73 / 73 real, 168 / 200 random,
+140 / 200 blocked) vT3 is the fastest everywhere except factory2 blocked (vT3 1.45–1.53 vs vB 1.44). vT3 is
+faster than vB on the typical leg of every set; its mean is pulled up by a tail of legs where it guesses the
+wrong way round an unseen blockage (blocked: 15 % of legs > 0.3 slower, 95th percentile +1.7), which vB
+avoids because it plans on the full map — the price of planning from sensors only.

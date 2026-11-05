@@ -60,7 +60,31 @@ def judge(P, n, batch, reached):
     return dict(success=float(ok.float().mean()), time_ratio=f(tr), time_s=f(m["time_s"]), length_m=f(m["length_m"]),
                 threat=f(m["F"][:, 1]), alt=f(m["F"][:, 2]), max_turn_deg=float(np.degrees(m["max_turn"][ok].max())) if ok.any() else float("nan"),
                 turn_rate_violations=float(((m["turn_per_m"] > KAPPA * 1.001) & ok).float().mean()),
-                collides=float(m["collides"].float().mean()))
+                collides=float(m["collides"].float().mean()),
+                leg_ok=ok.tolist(), leg_time_ratio=tr.tolist())                # per leg, for paired()
+
+
+def paired(out):
+    """time / straight on the same legs: (a) every method on the legs all of them complete, (b) vT against each
+    method on the legs both complete (mean difference, share of those legs vT flies faster). Methods judged on
+    other legs (+box variants) are left out."""
+    ms = [k for k in out if not k.endswith("+box")]
+    ok = {k: np.array(out[k]["leg_ok"], bool) for k in ms}
+    tr = {k: np.array(out[k]["leg_time_ratio"]) for k in ms}
+    common = np.logical_and.reduce([ok[k] for k in ms])
+    res = {"n_legs": int(len(common)), "n_common": int(common.sum()),
+           "common_time_ratio": {k: float(tr[k][common].mean()) if common.any() else float("nan") for k in ms}, "vs_vT": {}}
+    for k in ms:
+        if k == "vT":
+            continue
+        both = ok["vT"] & ok[k]
+        d = tr["vT"][both] - tr[k][both]
+        res["vs_vT"][k] = dict(n=int(both.sum()), vT=float(tr["vT"][both].mean()) if both.any() else float("nan"),
+                               other=float(tr[k][both].mean()) if both.any() else float("nan"),
+                               diff=float(d.mean()) if both.any() else float("nan"),
+                               vT_faster=float((d < 0).mean()) if both.any() else float("nan"),
+                               only_vT=int((ok["vT"] & ~ok[k]).sum()), only_other=int((~ok["vT"] & ok[k]).sum()))
+    return res
 
 
 def timed(fn, reps):
@@ -174,12 +198,19 @@ def main():
         for name, b in base:
             out[name] = run_baseline(b, worlds_legs, batch)
         res["sets"][s] = out
+        pr = paired(out)
+        res.setdefault("paired", {})[s] = pr
         print(f"== {s}")
         for k, v in out.items():
             print(f"  {k:18s} success {v['success']*100:5.1f} %  time/straight {v['time_ratio']:.3f}  time {v['time_s']:.1f} s  "
                   f"len {v['length_m']:.1f} m  threat {v['threat']:.3f}  alt {v['alt']:.3f}  max turn {v['max_turn_deg']:.0f} deg  "
                   f"turn-rate viol {v['turn_rate_violations']*100:.1f} %  plan {v['plan_ms']:.1f} ms/leg"
                   + (f"  crash {v['crash']*100:.1f} %" if "crash" in v else ""), flush=True)
+        print(f"  paired: {pr['n_common']} / {pr['n_legs']} legs completed by every method; time/straight there: "
+              + "  ".join(f"{k} {v:.3f}" for k, v in pr["common_time_ratio"].items()))
+        for k, v in pr["vs_vT"].items():
+            print(f"    vT vs {k:16s} on {v['n']:3d} legs both complete: {v['vT']:.3f} vs {v['other']:.3f} (diff {v['diff']:+.3f}), "
+                  f"vT faster on {v['vT_faster']*100:.0f} %; only vT {v['only_vT']}, only {k} {v['only_other']}", flush=True)
     tag = a.tag or Path(a.ckpt).stem
     p = ROOT / "results" / f"eval_t_{tag}.json"
     p.write_text(json.dumps(res, indent=1, default=str))
