@@ -20,9 +20,17 @@ a leg takes and how safely it is flown.
 The turn bound per metre matters: "45° per step" alone would allow sharp turns made of many tiny steps; the
 per-metre bound is a minimum turn radius (≈ 0.64 m at 1 m/s), so every vT path is flyable at cruise speed.
 
-Reward: on success −5 tanh(w·F / SCALE / 20) (F = [time / straight time − 1, threat, altitude + climb]);
-a collision or timeout −(6 + remaining distance / leg); per step a return-neutral potential on the distance to
-the goal, a proximity penalty 0.5 (1 − clearance / 0.5 m), −0.1 for a tabu direction, a small action penalty.
+Reward (since the reward fix below; w = preference over time, threat, altitude):
+- **time, every step**: −6 w_time × (this step's flight time / straight-line time), turns and backtrack reversals
+  included, charged up to 3× the straight-line time — the episode total is exactly 6 w_time × min(executed time /
+  straight time, 3);
+- **success**: +2 − min(Σ_{threat, alt} w_i F_i / SCALE_i, 4) (linear, no squashing);
+- **failure** (collision or timeout): −6 − the rest of the time cap, so every failure pays the full time charge
+  (crashing early is never cheaper than flying slowly) and any success beats any failure by ≥ 4;
+- per step a return-neutral potential on the distance to the goal (+1 in total on success), a proximity penalty
+  0.5 (1 − clearance / 0.5 m) (obstacles and walls), −0.1 for a tabu direction, a small action penalty.
+Constants in `env_t.py` / `configs/vT.yaml` (`c_time, t_cap, succ, fail, c_q, q_max`); the terms are logged per
+iteration (`r[time prox term]`).
 Observation: goal in the heading frame, distance / height to the goal, band and headroom, decisions and
 backtracks left, heading vs goal bearing, the last turn and step, time used, the margin-aware range scan, the
 obstacle-height scan, the tabu mask, the legal modes, the preference. Privileged critic: + ideal scans, goal
@@ -53,6 +61,15 @@ objectives); flight outcomes are.
    turn (no speed-dependent radius), no wind, battery or controller lag. It ranks paths; it does not predict
    flight time. Validate against PX4 SITL (logged setpoint tracking) before quoting absolute times.
 
+6. **Reward fix.** The old success term −5 tanh(w·F / SCALE / 20) was nearly flat in time: measured with vT_seed1
+   on 192 held-out legs, its time part averaged −0.04 for flights 25 % slower than straight, against −6.5 for a
+   failure (~150 : 1), and a backtrack (2 s reversal + the flight back) cost ~0.05; time was only scored at the
+   end of up to 60 decisions. Now time is charged per step (slope 2.0 per unit of time / straight at w = 1/3, was
+   0.17; spread across the same successes 0.5, was 0.04), the success term is linear, and a failure pays the
+   full time cap plus 6 (the double-counted remaining distance is gone: the shaping already charges it).
+   Tests: `scripts/test_time.py` [2c] (time charges add up to the capped executed time ratio, with backtracks;
+   straight flight return = 1 + 2 − 6 w_time; failures ≤ the bound; worst success > best failure).
+
 Tests: `scripts/test_time.py` section [2b] (flown turn bound on whole random episodes, env time == judge time
 with backtracks, reversal time and heading, F_exec vs F, wall collisions in env and judge).
 
@@ -74,3 +91,41 @@ python scripts/eval_t.py --ckpt results/ckpt/vT_seed1.pt --vg results/ckpt/vG3_b
 python scripts/eval_t.py --ckpt results/ckpt/vT_seed2.pt --worlds 50 --legs 16 --threads 8
 ```
 Each step is up to 60 decisions (vG: 20), so expect ~2–3× vG's time per iteration.
+
+## Retraining after the review and reward fixes (new pod)
+Every checkpoint trained before the fixes is invalid (env and reward changed): retrain vG (box model) as
+`vG4_box_*` and vT as `vT2_*`; vS / vB (NMOPSO environment) are unchanged and stay the baselines. This branch
+contains the vG code (merged from `generalizable-rl`), so one clone trains both.
+Commands:
+```bash
+# 1. setup (RTX PRO 4500 / 5090 Blackwell: cu130 wheels; A100 / H100: the same command works)
+cd /workspace
+git clone -b time-optimal-rl https://github.com/BV2005/rl-nmopso-factory-patrol && cd rl-nmopso-factory-patrol
+python3 -m venv .venv && . .venv/bin/activate
+pip install --upgrade pip
+pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cu130
+pip install numpy scipy matplotlib pyyaml
+python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+# 2. self-tests (both must end with 'all N checks passed')
+python scripts/test_generalizable.py --device cuda
+python scripts/test_time.py --device cuda
+# 3. world pool (train / held-out / OOD)
+python scripts/make_worlds.py --train 2000 --heldout 200 --ood 200
+# 4. training: 2 seeds each, 4 runs in parallel
+mkdir -p results/runs
+for s in 1 2; do
+  nohup python scripts/train_g.py --name vG4_box_seed$s --config configs/vG3_box.yaml --seed $s > results/runs/vG4_box_seed${s}_runner.out 2>&1 &
+  nohup python scripts/train_t.py --name vT2_seed$s --config configs/vT.yaml --seed $s > results/runs/vT2_seed${s}_runner.out 2>&1 &
+done
+tail -f results/runs/vT2_seed1.log            # watch: succ, det succ, det time/straight, r[time prox term]
+nvidia-smi                                    # GPU use
+# 5. evaluation (after training)
+python scripts/eval_worlds.py --ckpt results/ckpt/vG4_box_seed1.pt --baselines results/ckpt/vS_seed1.pt,results/ckpt/vB_seed1.pt
+python scripts/eval_worlds.py --ckpt results/ckpt/vG4_box_seed2.pt
+python scripts/eval_t.py --ckpt results/ckpt/vT2_seed1.pt --vg results/ckpt/vG4_box_seed1.pt,results/ckpt/vG4_box_seed2.pt \
+       --baselines results/ckpt/vS_seed1.pt,results/ckpt/vB_seed1.pt --worlds 50 --legs 16 --threads 8
+python scripts/eval_t.py --ckpt results/ckpt/vT2_seed2.pt --worlds 50 --legs 16 --threads 8
+# 6. bring results home (from your PC: scp -P <port> root@<pod-ip>:/workspace/rl-nmopso-factory-patrol/results_fix.tgz .)
+tar czf results_fix.tgz results/ckpt/vG4_box_seed*.pt results/ckpt/vT2_seed*.pt results/runs/vG4_box_seed* results/runs/vT2_seed* \
+        results/eval_*vG4_box* results/eval_t_vT2_*
+```

@@ -8,6 +8,9 @@
      a backtrack = reversal yaw (4 T_TURN) + the flight back, heading = the direction flown back; reward
      objectives are the executed flight's (F_exec), the route's are reported (F); steps are not clamped to
      the hall (a step into a wall's margin collides) and the judge counts wall collisions
+  2c. reward: the per-step time charges add up to C_TIME w_time min(executed time / straight time, T_CAP)
+     (with backtracks too); a straight open flight returns SHAPE + SUCC - C_TIME w_time; a failure pays FAIL
+     + the full time cap; the worst success beats any failure
   3. PPO: rollout log-probs == recomputation, 3 training iterations, resume
   4. eval_t.py against vG, vS, vB on 2 held-out worlds and factory2's real legs
   python scripts/test_time.py [--device cpu] [--batch 128]"""
@@ -24,8 +27,9 @@ import torch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from rlpatrol.env_g import EVAL, build_batch  # noqa: E402
-from rlpatrol.env_t import (ADVANCE, BACK, CTX, KAPPA, OBS_BASE, PRIV, R_MAX, R_MIN, T_MAX, T_TURN, TURN_MAX,  # noqa: E402
-                            V_CRUISE, V_Z, TEnv, flight_metrics, sample_pref3, segment_time)
+from rlpatrol.env_t import (ADVANCE, BACK, C_TIME, CTX, FAIL, KAPPA, OBS_BASE, PRIV, Q_MAX, R_MAX, R_MIN, SHAPE,  # noqa: E402
+                            SUCC, T_CAP, T_MAX, T_TURN, TURN_MAX, V_CRUISE, V_Z, TEnv, flight_metrics, sample_pref3,
+                            segment_time)
 from rlpatrol.ppo_g import ActorG, batch_from_levels, load_checkpoint  # noqa: E402
 from rlpatrol.ppo_t import ConfigT, make_actor_t, rollout_t, train_t  # noqa: E402
 from rlpatrol.worldgen import generate  # noqa: E402
@@ -164,6 +168,52 @@ def review_fix_checks(dev):
     check(bool(mw["collides"].all()) and not bool(mo["collides"].any()), "the judge: a path within 0.5 m of a wall collides")
 
 
+def reward_checks(dev):
+    print("[2c] reward")
+    legs = [[0, 0, 1.8, 7.3, 0, 1.8], [0, 0, 1.8, 0, 9.1, 1.8], [-3, 2, 1.8, 4, -5, 1.8]]
+    ob = build_batch(open_items(legs), dev)
+    w = torch.tensor([[0.5, 0.25, 0.25], [1 / 3, 1 / 3, 1 / 3], [0.2, 0.4, 0.4]], dtype=torch.float64)
+    env = TEnv(ob, w, domain=EVAL, c_prox=0.0, act_pen=0.0)
+    tot = torch.zeros(3, dtype=torch.float64)
+    for _ in range(60):
+        r_, done = env.step(torch.full((3,), ADVANCE), torch.tensor([[1.0, 0.0, 0.0]] * 3))
+        tot += r_.double().cpu()
+        if done:
+            break
+    q = (env.r_term.cpu() - SUCC).neg()
+    exp = SHAPE + SUCC - C_TIME * w[:, 0] - q
+    check(bool(env.success.all()) and bool(torch.allclose(tot, exp, atol=1e-5)),
+          f"straight open flight: return = SHAPE + SUCC - C_TIME w_time ({tot.tolist()})")
+    W = [generate(s) for s in range(4)]
+    b = batch_from_levels([{"world": i, "legs_seed": 60 + i} for i in range(4)], W, 32, ConfigT(), dev)
+    B = len(b["legs"])
+    pw = sample_pref3(B, torch.Generator().manual_seed(4))
+    env = TEnv(b, pw, domain=EVAL)
+    g = torch.Generator().manual_seed(5)
+    tot = torch.zeros(B, dtype=torch.float64)
+    for _ in range(T_MAX):
+        _, _, L = env.obs_pair(False)
+        mode = torch.multinomial(L.float().cpu(), 1, generator=g)[:, 0]
+        r_, done = env.step(mode, torch.rand(B, 3, generator=g, dtype=torch.float64) * 2 - 1)
+        tot += r_.double().cpu()
+        if done:
+            break
+    s, f = env.success.cpu(), ~env.success.cpu()
+    ratio = (env.time / env.t_st).cpu()
+    charged = torch.where(s, C_TIME * pw[:, 0] * ratio.clamp(max=T_CAP), C_TIME * pw[:, 0] * T_CAP)
+    fail_time = (-env.r_term.cpu() - FAIL)                                       # the top-up of failures
+    check(int(env.backs.sum()) > 0 and bool(torch.allclose(env.r_time.cpu()[s], charged[s], atol=1e-9)) and
+          bool(torch.allclose((env.r_time.cpu() + fail_time)[f], charged[f], atol=1e-9)),
+          f"time charges = C_TIME w_time min(time / straight, T_CAP) on successes, the full cap on failures "
+          f"({int(s.sum())} successes, {int(f.sum())} failures, {int(env.backs.sum())} backtracks)")
+    worst_success = SHAPE + SUCC - C_TIME * T_CAP - Q_MAX
+    best_failure = SHAPE - FAIL - C_TIME * T_CAP
+    bound = SHAPE - FAIL - C_TIME * pw[:, 0] * T_CAP                             # per episode (its w_time)
+    check(worst_success - best_failure >= 4.0 - 1e-9 and (not f.any() or bool((tot[f] <= bound[f] + 1e-5).all())),
+          f"the worst success ({worst_success:+.1f} before step penalties) beats the best failure ({best_failure:+.1f}); "
+          f"every random failure returned <= that")
+
+
 def ppo_checks(dev, batch_n):
     print("[3] PPO")
     W = [generate(s) for s in range(6)]
@@ -214,6 +264,7 @@ def main():
     model_checks()
     env_checks(dev)
     review_fix_checks(dev)
+    reward_checks(dev)
     ppo_checks(dev, a.batch)
     print(f"all {len(OK)} checks passed")
 

@@ -35,6 +35,12 @@ class ConfigT:
     c_prox: float = 0.5
     d_safe: float = 0.5
     box_margin: float = 0.5
+    c_time: float = 6.0               # reward (env_t docstring): time per unit of time / straight time at w_time = 1
+    t_cap: float = 3.0
+    succ: float = 2.0
+    fail: float = 6.0
+    c_q: float = 1.0
+    q_max: float = 4.0
     c_back_time: float = 1.0          # unused since the review fix (a backtrack is timed by the time model); kept
                                       # so old checkpoints' configs still load
     plr: bool = False
@@ -75,7 +81,8 @@ def make_critic_t(cfg):
 def env_options_t(cfg):
     g = lambda k, d: _get(cfg, k, d)  # noqa: E731
     return dict(act_pen=g("act_pen", 0.02), c_prox=g("c_prox", 0.5), d_safe=g("d_safe", 0.5),
-                box_margin=g("box_margin", 0.5))
+                box_margin=g("box_margin", 0.5), c_time=g("c_time", 6.0), t_cap=g("t_cap", 3.0), succ=g("succ", 2.0),
+                fail=g("fail", 6.0), c_q=g("c_q", 1.0), q_max=g("q_max", 4.0))
 
 
 def rollout_t(actor, batch, pref, cfg, deterministic=False, priv=True, generator=None, domain=None):
@@ -102,7 +109,8 @@ def episode_stats_t(env):
                 timeout=(~s & ~env.crashed).float().mean().item(),
                 time_ratio=t_ratio.mean().item() if s.any() else math.nan,
                 backtracks=env.backs.float().mean().item(), climbs=env.n_climb.float().mean().item(),
-                steps=env.k.float().mean().item())
+                steps=env.k.float().mean().item(), r_time=-env.r_time.mean().item(), r_prox=-env.r_prox.mean().item(),
+                r_term=env.r_term.mean().item())
 
 
 def train_t(cfg: ConfigT, log=print, ckpt=None, resume=None, metrics=None, snapshot=None, worlds=None):
@@ -217,7 +225,8 @@ def train_t(cfg: ConfigT, log=print, ckpt=None, resume=None, metrics=None, snaps
             log(f"it {it:4d}  ret {row['ret']:+.3f}  succ {st['success']*100:5.1f} %  crash {st['crash']*100:4.1f} %  "
                 f"timeout {st['timeout']*100:4.1f} %  det succ {row['det_success']*100:5.1f} %  "
                 f"det time/straight {row['det_time_ratio']:.2f}  back {st['backtracks']:.2f} climb {st['climbs']:.2f}  "
-                f"steps {st['steps']:.1f}  kl {row['kl']:.3f}  v {row['value_loss']:.3f}  {row['sec']:.1f} s")
+                f"steps {st['steps']:.1f}  r[time {st['r_time']:+.2f} prox {st['r_prox']:+.2f} term {st['r_term']:+.2f}]  "
+                f"kl {row['kl']:.3f}  v {row['value_loss']:.3f}  {row['sec']:.1f} s")
         hist.append(row)
         if mf:
             mf.write(json.dumps(row) + "\n")
