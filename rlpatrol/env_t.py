@@ -101,6 +101,7 @@ def reversals(P, n):
     """[B, N] bool: waypoints where a backtrack starts, i.e. the next waypoint was visited before (the drone
     stops and yaws round there; timed like any turn, but not a flown curve, so not held to the turn-rate bound)."""
     B, N, _ = P.shape
+    n = n.to(P.device)
     ar = torch.arange(N, device=P.device)
     same = (P[:, :, None] - P[:, None]).norm(dim=-1) < 1e-9                # [B, N, N]
     seen = (same[:, 1:] & (ar[None, None, :] < ar[None, :-1, None])).any(-1)   # P[j + 1] == P[i], i < j
@@ -114,7 +115,9 @@ def flight_metrics(P, n, boxes, kmask, margin=BOX_MARGIN, zband=ZBAND, walls=Non
     dict of [B] tensors: time_s, length_m, F (time, threat, alt) [B, 3], collides (box model: obstacles in
     kmask, plus the walls mask if given), max_turn (rad, largest heading change at a waypoint),
     turn_per_m (largest |turn| / following horizontal step length); backtrack reversals (reversals()) are
-    timed but left out of max_turn / turn_per_m."""
+    timed but left out of max_turn / turn_per_m. Every input is moved to P's device."""
+    n, boxes, kmask = n.to(P.device), boxes.to(device=P.device, dtype=P.dtype), kmask.to(P.device)
+    walls = None if walls is None else walls.to(P.device)
     B, N, _ = P.shape
     dev, dt = P.device, P.dtype
     ar = torch.arange(N, device=dev)
