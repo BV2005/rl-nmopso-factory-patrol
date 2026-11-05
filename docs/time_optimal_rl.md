@@ -129,3 +129,37 @@ python scripts/eval_t.py --ckpt results/ckpt/vT2_seed2.pt --worlds 50 --legs 16 
 tar czf results_fix.tgz results/ckpt/vG4_box_seed*.pt results/ckpt/vT2_seed*.pt results/runs/vG4_box_seed* results/runs/vT2_seed* \
         results/eval_*vG4_box* results/eval_t_vT2_*
 ```
+
+## vT2 results and vT3 (training stability)
+vT2 (fixed env + reward) peaked around it 500 and then degraded. Both seeds at it 500, shared judge, success %:
+held-out 90.6, OOD 95.5, factory2 real 99.3, random 93.3, blocked 85.5 (seed 1 / 2 on blocked: 90.5 / 80.5),
+0 % turn-rate violations; vS 89.5 / 94.1 / 100 / 93.5 / 87.5, vB (full map) 91.3 / 95.7 / 100 / 97.0 / 93.5.
+Final checkpoints were worse (seed 1 blocked 81.0 %, seed 2 52.0 %). Seed 2's log shows why: the learned std
+fell to 0.07–0.14 (the schedule only capped it from above, the entropy bonus decayed to 0), so the constant lr
+made large policy steps — from it ~540 the KL exceeded its target after the first epoch on every iteration, with
+a 0.21 spike at it 600 — and the backtrack mode crept from 3.5 % to 9 % of decisions. Picking the it-500
+snapshot by its held-out / factory2 results would also mean choosing on the test sets.
+
+vT3 = vT2 env and reward + (`configs/vT3.yaml`, all off by default in `ConfigT`): actor lr decaying linearly
+3e-4 → 3e-5; the update stops at the first minibatch with KL > 1.5 × target; log std ≥ −1.9 (std ≥ 0.15);
+entropy coefficient ≥ 0.001; 800 iterations; a validation world set (32 worlds, seeds 30 000 000.., disjoint from
+train / held-out / OOD) scored every 20 iterations, the best one saved as `<name>_best.pt` (score = success −
+0.25 (time / straight − 1)) — report `_best`, never a checkpoint chosen on a test set. 3 seeds for the spread.
+```bash
+cd /workspace && git clone -b time-optimal-rl https://github.com/BV2005/rl-nmopso-factory-patrol && cd rl-nmopso-factory-patrol
+# (or, on the existing pod: cd /workspace/rl-nmopso-factory-patrol && git pull)
+python3 -m venv .venv && . .venv/bin/activate          # skip on the existing pod; just: . .venv/bin/activate
+pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cu130 && pip install numpy scipy matplotlib pyyaml
+python scripts/test_time.py --device cuda
+python scripts/make_worlds.py --train 2000 --heldout 200 --ood 200     # skip if data/worlds/*.pkl exist
+mkdir -p results/runs
+for s in 1 2 3; do
+  nohup python scripts/train_t.py --name vT3_seed$s --config configs/vT3.yaml --seed $s > results/runs/vT3_seed${s}_runner.out 2>&1 &
+done
+tail -f results/runs/vT3_seed1.log            # every 20 it: ... lr ...  val succ .. % t/s .. (*best* when saved)
+# after training: evaluate the validation-selected checkpoints (vG4 / vS / vB for comparison)
+python scripts/eval_t.py --ckpt results/ckpt/vT3_seed1_best.pt --vg results/ckpt/vG4_box_seed1.pt,results/ckpt/vG4_box_seed2.pt \
+       --baselines results/ckpt/vS_seed1.pt,results/ckpt/vB_seed1.pt --worlds 50 --legs 16 --threads 8
+for s in 2 3; do python scripts/eval_t.py --ckpt results/ckpt/vT3_seed${s}_best.pt --worlds 50 --legs 16 --threads 8; done
+tar czf results_vt3.tgz results/ckpt/vT3_seed* results/runs/vT3_seed* results/eval_t_vT3_*
+```

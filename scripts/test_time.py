@@ -241,6 +241,16 @@ def ppo_checks(dev, batch_n):
         c4 = ConfigT(**{**c.__dict__, "iters": 4})
         _, _, h2, _ = train_t(c4, log=lambda s: None, ckpt=ck, resume=load_checkpoint(ck), worlds=W)
         check(len(h2) == 4 and h2[-1]["it"] == 3, "resume continues at iteration 3")
+        bk = Path(d) / "vt3_best.pt"
+        c3 = ConfigT(iters=3, batch=batch_n, minibatch=batch_n * 8, levels_per_iter=8, device=str(dev), probe_every=0,
+                     ckpt_every=10, lr_end=3e-5, kl_stop=1.5, log_std_min=-1.9, ent_min=0.001, val_every=1, val_worlds=2,
+                     val_legs=4)
+        a3, _, h3, _ = train_t(c3, log=lambda s: None, ckpt=Path(d) / "vt3.pt", worlds=W, best=bk)
+        lrs = [h["lr"] for h in h3]
+        check(bk.exists() and all("val_success" in h for h in h3) and abs(lrs[0] - 3e-4) < 1e-12 and abs(lrs[-1] - 3e-5) < 1e-12
+              and bool((a3.log_std >= -1.9 - 1e-9).all()) and min(h["ent_coef"] for h in h3) >= 0.001,
+              f"vT3: lr decays {lrs[0]:.0e} -> {lrs[-1]:.0e}, log std >= -1.9, entropy floor, validation every iteration, "
+              f"best checkpoint saved (val succ {[round(h['val_success'], 2) for h in h3]})")
         print("[4] eval_t.py (common judge, planning time)")
         r = subprocess.run([sys.executable, str(ROOT / "scripts" / "eval_t.py"), "--ckpt", str(ck),
                             "--vg", str(ROOT / "results" / "ckpt" / "vG3_box_seed1.pt"),

@@ -1,5 +1,18 @@
 """PPO for vT (rlpatrol/env_t.py): the hybrid actor, privileged critic, world pool, PLR and checkpointing of
-the generalizable policy (rlpatrol/ppo_g.py), with the step-wise, time-minimising environment."""
+the generalizable policy (rlpatrol/ppo_g.py), with the step-wise, time-minimising environment.
+
+vT3 training stability (all off by default = vT2 behaviour; on in configs/vT3.yaml), after vT2 peaked at ~it 500
+and then degraded (seed 2 collapsed at it ~600: the learned std fell to 0.07-0.14, below the schedule, so the
+constant lr made huge policy steps; KL over target after the first epoch every iteration, a 0.21 spike; the
+backtrack mode crept from 3.5 % to 9 % of decisions):
+  lr_end       actor lr decays linearly from lr to lr_end over the run (-1: constant)
+  kl_stop      stop the update as soon as a minibatch's approx. KL > kl_stop * target_kl (0: per-epoch check only)
+  log_std_min  floor on the actor's log std (the schedule only capped it from above)
+  ent_min      floor on the entropy coefficient (it decayed to 0)
+  val_*        a validation world set (seeds 30_000_000.., never trained on, disjoint from held-out 10_000_000..
+               and OOD 20_000_000..), scored deterministically every val_every iterations; the best checkpoint
+               (val success - val_time_w * (time / straight - 1)) is saved as <name>_best.pt: report that one, so
+               no test set is used to choose a checkpoint."""
 import json
 import math
 import time
@@ -21,16 +34,20 @@ class ConfigT:
     epochs: int = 10
     minibatch: int = 16384
     lr: float = 3e-4
+    lr_end: float = -1.0              # vT3: linear actor-lr decay to this (-1: constant lr)
     lr_v: float = 1e-3
     gamma: float = 1.0
     lam: float = 0.95
     clip: float = 0.2
     target_kl: float = 0.02
+    kl_stop: float = 0.0              # vT3: stop at a minibatch with KL > kl_stop * target_kl (0: off)
     ent: float = 0.003
+    ent_min: float = 0.0              # vT3: entropy-coefficient floor
     hidden: int = 256
     log_std0: float = -1.0
     noise_decay: bool = True
     log_std_end: float = -2.2
+    log_std_min: float = -9.0         # vT3: floor on the learned log std (-9: off)
     act_pen: float = 0.02
     c_prox: float = 0.5
     d_safe: float = 0.5
@@ -61,7 +78,13 @@ class ConfigT:
     ckpt_every: int = 10
     snapshot_every: int = 0
     probe_every: int = 20
+    val_every: int = 0                # vT3: validation + best checkpoint every n iterations (0: off)
+    val_worlds: int = 32
+    val_legs: int = 8
+    val_time_w: float = 0.25          # best = val success - val_time_w * (val time / straight - 1)
 
+
+VAL_SEED0 = 30_000_000                # validation worlds (held-out: 10_000_000.., OOD: 20_000_000..)
 
 RESUMABLE = {"iters", "device", "threads", "ckpt_every", "snapshot_every", "probe_every"}
 
@@ -113,7 +136,25 @@ def episode_stats_t(env):
                 r_term=env.r_term.mean().item())
 
 
-def train_t(cfg: ConfigT, log=print, ckpt=None, resume=None, metrics=None, snapshot=None, worlds=None):
+def validation_set(cfg, dev):
+    """the fixed validation batch: val_worlds generated worlds (never trained on), val_legs legs each."""
+    from .worldgen import TRAIN, generate
+    W = [generate(VAL_SEED0 + i, TRAIN) for i in range(cfg.val_worlds)]
+    levels = [{"world": i, "legs_seed": 31_000 + i} for i in range(len(W))]
+    return batch_from_levels(levels, W, cfg.val_legs, cfg, dev)
+
+
+def validate(actor, vb, cfg):
+    """deterministic, noise-free rollout on the validation batch -> (score, success, time ratio)."""
+    from .env_g import EVAL
+    pref = torch.full((len(vb["legs"]), 3), 1 / 3, dtype=torch.float64)
+    _, env = rollout_t(actor, vb, pref, cfg, deterministic=True, priv=False, domain=EVAL)
+    st = episode_stats_t(env)
+    tr = st["time_ratio"] if math.isfinite(st["time_ratio"]) else 3.0
+    return st["success"] - cfg.val_time_w * (tr - 1), st["success"], tr
+
+
+def train_t(cfg: ConfigT, log=print, ckpt=None, resume=None, metrics=None, snapshot=None, worlds=None, best=None):
     from .ppo import resolve_device
     dev = resolve_device(cfg.device)
     if cfg.threads:
@@ -129,6 +170,8 @@ def train_t(cfg: ConfigT, log=print, ckpt=None, resume=None, metrics=None, snaps
     opt_a = torch.optim.Adam(actor.parameters(), lr=cfg.lr)
     opt_v = torch.optim.Adam(crit.parameters(), lr=cfg.lr_v)
     ret_scale, hist, it0 = None, [], 0
+    best_score = -math.inf
+    vb = validation_set(cfg, dev) if cfg.val_every else None
     if resume is not None:
         dflt = {f.name: f.default for f in fields(ConfigT)}
         diff = {k: (resume["cfg"].get(k, dflt[k]), v) for k, v in asdict(cfg).items()
@@ -138,6 +181,7 @@ def train_t(cfg: ConfigT, log=print, ckpt=None, resume=None, metrics=None, snaps
         actor.load_state_dict(resume["actor"]); crit.load_state_dict(resume["critic"])
         opt_a.load_state_dict(resume["opt_a"]); opt_v.load_state_dict(resume["opt_v"])
         ret_scale, hist, it0 = resume["ret_scale"], list(resume["hist"]), resume["it"] + 1
+        best_score = resume.get("best_score", -math.inf)
         plr.load(resume["plr"]); rng.bit_generator.state = resume["rng"]
         torch.set_rng_state(resume["torch_rng"])
         log(f"resumed at iteration {it0}")
@@ -146,12 +190,17 @@ def train_t(cfg: ConfigT, log=print, ckpt=None, resume=None, metrics=None, snaps
     def state(it):
         return {"format": "vT1", "actor": actor.state_dict(), "critic": crit.state_dict(), "opt_a": opt_a.state_dict(),
                 "opt_v": opt_v.state_dict(), "cfg": asdict(cfg), "hist": hist, "it": it, "ret_scale": ret_scale,
-                "plr": plr.state(), "rng": rng.bit_generator.state, "torch_rng": torch.get_rng_state(), "torch": torch.__version__}
+                "plr": plr.state(), "rng": rng.bit_generator.state, "torch_rng": torch.get_rng_state(), "torch": torch.__version__,
+                "best_score": best_score}
 
     per_level = max(1, cfg.batch // cfg.levels_per_iter)
     it = it0 - 1
     for it in range(it0, cfg.iters):
         t0 = time.time()
+        frac = it / max(cfg.iters - 1, 1)
+        if cfg.lr_end >= 0:
+            for g_ in opt_a.param_groups:
+                g_["lr"] = cfg.lr + frac * (cfg.lr_end - cfg.lr)
         levels = plr.sample(cfg.levels_per_iter, it, cfg.plr)
         batch = batch_from_levels(levels, worlds, per_level, cfg, dev)
         B = len(batch["legs"])
@@ -183,10 +232,10 @@ def train_t(cfg: ConfigT, log=print, ckpt=None, resume=None, metrics=None, snaps
         o, oc, mo, uu, lp, lg = (x.reshape(B * T, *x.shape[2:])[keep] for x in (O, OC, MO, U, LP, LG))
         ad, rt = adv.reshape(-1)[keep], ret.reshape(-1)[keep]
         ad = (ad - ad.mean()) / (ad.std() + 1e-8)
-        frac = it / max(cfg.iters - 1, 1)
-        ent_coef = cfg.ent * (1 - frac) if cfg.noise_decay else cfg.ent
+        ent_coef = max(cfg.ent * (1 - frac), cfg.ent_min) if cfg.noise_decay else cfg.ent
         kls, pls, vls = [], [], []
         ep = 0
+        stop = False
         for ep in range(cfg.epochs):
             ek = []
             for idx in torch.randperm(len(ad), device=dev).split(cfg.minibatch):
@@ -204,19 +253,34 @@ def train_t(cfg: ConfigT, log=print, ckpt=None, resume=None, metrics=None, snaps
                 nn.utils.clip_grad_norm_(crit.parameters(), 1.0); opt_v.step()
                 ek.append(((ratio - 1) - lr_).mean().item())
                 pls.append(pl.item()); vls.append(vl.item())
+                if cfg.kl_stop > 0 and ek[-1] > cfg.kl_stop * cfg.target_kl:
+                    stop = True
+                    break
             kl = float(np.mean(ek)) if ek else math.nan
             kls.append(kl)
-            if not ek or kl > cfg.target_kl:
+            if stop or not ek or kl > cfg.target_kl:
                 break
-        if cfg.noise_decay:
-            with torch.no_grad():
+        with torch.no_grad():
+            if cfg.noise_decay:
                 actor.log_std.clamp_(max=cfg.log_std0 + frac * (cfg.log_std_end - cfg.log_std0))
+            actor.log_std.clamp_(min=cfg.log_std_min)
         st = episode_stats_t(env)
         modes = torch.bincount(mo, minlength=3).float() / max(len(mo), 1)
         row = dict(it=it, ret=(R * m).sum(1).mean().item(), **st, mode_frac=modes.tolist(), kl=kls[-1] if kls else math.nan,
                    epochs=ep + 1, policy_loss=float(np.mean(pls)) if pls else math.nan,
                    value_loss=float(np.mean(vls)) if vls else math.nan, std=actor.log_std.exp().tolist(),
-                   plr_levels=len(plr.levels), steps_T=T, sec=time.time() - t0)
+                   plr_levels=len(plr.levels), steps_T=T, sec=time.time() - t0, lr=opt_a.param_groups[0]["lr"],
+                   ent_coef=ent_coef)
+        vtxt = ""
+        if vb is not None and (it % cfg.val_every == 0 or it == cfg.iters - 1):
+            sc, vs, vt = validate(actor, vb, cfg)
+            row.update(val_score=sc, val_success=vs, val_time_ratio=vt)
+            is_best = sc > best_score
+            if is_best:
+                best_score = sc
+                if best:
+                    save_checkpoint(best, state(it))
+            vtxt = f"  val succ {vs*100:5.1f} % t/s {vt:.2f}{' *best*' if is_best else ''}"
         if cfg.probe_every and (it % cfg.probe_every == 0 or it == cfg.iters - 1):
             pb = batch_from_levels(probe_levels, worlds, 16, cfg, dev)
             g = torch.Generator().manual_seed(5)
@@ -226,7 +290,9 @@ def train_t(cfg: ConfigT, log=print, ckpt=None, resume=None, metrics=None, snaps
                 f"timeout {st['timeout']*100:4.1f} %  det succ {row['det_success']*100:5.1f} %  "
                 f"det time/straight {row['det_time_ratio']:.2f}  back {st['backtracks']:.2f} climb {st['climbs']:.2f}  "
                 f"steps {st['steps']:.1f}  r[time {st['r_time']:+.2f} prox {st['r_prox']:+.2f} term {st['r_term']:+.2f}]  "
-                f"kl {row['kl']:.3f}  v {row['value_loss']:.3f}  {row['sec']:.1f} s")
+                f"kl {row['kl']:.3f}  v {row['value_loss']:.3f}  lr {row['lr']:.1e}  {row['sec']:.1f} s" + vtxt)
+        elif vtxt:
+            log(f"it {it:4d}" + vtxt)
         hist.append(row)
         if mf:
             mf.write(json.dumps(row) + "\n")

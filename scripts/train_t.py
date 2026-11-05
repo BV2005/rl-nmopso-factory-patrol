@@ -76,7 +76,8 @@ def main():
         + (f"  gpu {torch.cuda.get_device_name(dev)}" if dev.type == "cuda" else ""))
     log(f"config_json {json.dumps(asdict(cfg))}")
     try:
-        train_t(cfg, log=log, ckpt=ckpt, resume=resume, metrics=metp, snapshot=str(ckpt.parent / f"{a.name}_it{{it:04d}}.pt"))
+        train_t(cfg, log=log, ckpt=ckpt, resume=resume, metrics=metp, snapshot=str(ckpt.parent / f"{a.name}_it{{it:04d}}.pt"),
+                best=ckpt.parent / f"{a.name}_best.pt")
     except KeyboardInterrupt:
         log(f"interrupted; resume with: python scripts/train_t.py --name {a.name} --resume")
         sys.exit(130)
