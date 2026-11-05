@@ -15,6 +15,9 @@
      segment-to-box distance exact (vs brute force); box-model cost (beside / through / over a box) and
      collision check agree; the scan reports ranges to the zone (margin) and inflated_bins gives the same
      from a point cloud (flight); box-model training + NMOPSO re-scoring in eval_worlds
+  8. review fixes: after a backtrack the heading is the direction flown back; steps are not clamped to the
+     hall (a step near a wall is a collision instead); the reward scores the executed flight (F_exec ==
+     F without backtracks, the full flown polyline with them)
   python scripts/test_generalizable.py [--device cpu] [--batch 256]"""
 import argparse
 import json
@@ -334,6 +337,54 @@ def round3_checks(dev, batch_n):
         (ROOT / "results" / "eval_g_selftest_r3.json").unlink(missing_ok=True)
 
 
+def review_fix_checks(dev):
+    print("[8] review fixes (backtrack heading, no clamping / walls, executed objectives)")
+    from rlpatrol.env_g import EVAL, TURN, WALL_MARGIN
+    corner = np.array([[-9.0, -8.5, -9.0, -8.5, 1.0]])                                      # one far-away box
+    items = [(np.array([-10, 10, -10, 10.0]), corner, cylinders(corner), np.array([-6, 0, 1.8, 6, 0, 1.8]), None)] * 2
+    b = build_batch(items, dev)
+    w = torch.tensor([[1 / 3, 0, 1 / 3, 1 / 3]] * 2, dtype=torch.float64)
+    u = torch.full((2,), 0.6, dtype=torch.float64)
+    env = GenEnv(b, w, u, domain=EVAL, modes="all")
+    env.step(torch.full((2,), ADVANCE), torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.5, 0.0]]))   # east; north-east
+    a_pt, b_pt = env.nodes[:, 0].clone(), env.cur.clone()
+    env.step(torch.full((2,), BACK), torch.zeros(2, 3))
+    back_dir = torch.atan2(a_pt[:, 1] - b_pt[:, 1], a_pt[:, 0] - b_pt[:, 0])
+    check(bool(torch.allclose(env.heading, back_dir)), f"after a backtrack the heading is the direction flown back "
+          f"({np.degrees(env.heading.cpu().numpy()).round(0).tolist()} deg)")
+    q, _ = env._proposal(torch.full((2,), ADVANCE), torch.tensor([[1.0, 1.0, 0.0], [1.0, -1.0, 0.0]]))
+    p = env.cur
+    hd = env.heading
+    step_dir = torch.atan2(q[:, 1] - p[:, 1], q[:, 0] - p[:, 0])
+    dturn = torch.atan2(torch.sin(step_dir - hd), torch.cos(step_dir - hd)).abs()
+    check(bool((dturn <= TURN + 1e-9).all()), "the step is not bent after the turn bound (no clamping): flown turn <= TURN")
+    wall = torch.tensor([[8.9, 0, 1.8], [8.0, 0, 1.8]], dtype=torch.float64)
+    near = torch.tensor([[9.7, 0, 1.8], [9.1, 0, 1.8]], dtype=torch.float64)                 # 0.3 m / 0.9 m from x = 10
+    wh = env._wall_hit(wall.to(dev), near.to(dev))
+    check(bool(wh[0]) and not bool(wh[1]), f"a step within {WALL_MARGIN} m of a wall collides, one 0.9 m away does not")
+    bb, ww, uu, B = b, w, None, 2                                               # the open hall, no budget
+    short = torch.tensor([[-0.3, 0.0, 0.0]] * 2)                                 # last node short of the goal
+    e1 = GenEnv(bb, ww, uu, domain=EVAL)
+    for _ in range(T_DEC):
+        _, done = e1.step(torch.full((B,), ADVANCE), short)
+        if done:
+            break
+    fin = e1.feasible
+    check(bool(fin.all()) and bool(torch.allclose(e1.F, e1.F_exec)), "without backtracks F_exec == F (route = executed)")
+    e2 = GenEnv(bb, ww, uu, domain=EVAL)
+    e2.step(torch.full((B,), ADVANCE), short)
+    e2.step(torch.full((B,), BACK), torch.zeros(B, 3))
+    for _ in range(T_DEC - 2):
+        _, done = e2.step(torch.full((B,), ADVANCE), short)
+        if done:
+            break
+    f2 = e2.feasible
+    Pe, ne = e2.executed()
+    Fe = e2._cost(Pe, ne)
+    check(bool(f2.all()) and bool((e2.F_exec[:, 0] > e2.F[:, 0]).all()) and bool(torch.allclose(Fe, e2.F_exec)),
+          "with a backtrack F_exec is the cost of the whole flown polyline (longer than the route)")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--device", default="cpu")
@@ -349,6 +400,7 @@ def main():
     ppo_checks(dev, a.batch)
     round2_checks(dev, a.batch)
     round3_checks(dev, a.batch)
+    review_fix_checks(dev)
     print(f"all {len(OK)} checks passed")
 
 
