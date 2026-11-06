@@ -186,17 +186,32 @@ def bins_from_laserscan(ranges, angle_min, angle_increment, range_min=LIDAR_RANG
     return _bin_min(ang, r)
 
 
-def bins_from_points(points, drone_z, roll=0.0, pitch=0.0):
-    """depth-camera points [N, 3] in the camera frame (x forward, y left, z up, origin the optical
-    centre) -> [SCAN_BINS] metres. The points are levelled with the drone's roll and pitch, kept if
-    they are at least OBST_MIN_H above the floor (drone_z: base_link height) and inside the depth
-    range and horizontal field of view; each bin is the nearest horizontal range."""
+def laserscan_points(ranges, angle_min, angle_increment, range_min=LIDAR_RANGE[0], range_max=LIDAR_RANGE[1]):
+    """sensor_msgs/LaserScan fields -> [N, 2] returns (x forward, y left; origin the lidar), valid ranges only."""
+    r = np.asarray(ranges, float)
+    ang = angle_min + angle_increment * np.arange(len(r))
+    ok = np.isfinite(r) & (r >= range_min) & (r <= range_max)
+    return np.c_[r[ok] * np.cos(ang[ok]), r[ok] * np.sin(ang[ok])]
+
+
+def level(points, roll=0.0, pitch=0.0):
+    """camera-frame points [N, 3] (x forward, y left, z up) rotated by the drone's roll and pitch (FLU, rad: right-
+    handed about x forward and y left, so a positive pitch is nose down; PatrolFollower-style roll_pitch() returns
+    them from PX4's FRD attitude) into the gravity-aligned frame with the same heading; non-finite points dropped."""
     p = np.asarray(points, float).reshape(-1, 3)
     p = p[np.isfinite(p).all(1)]
     cr, sr, cp, sp = math.cos(roll), math.sin(roll), math.cos(pitch), math.sin(pitch)
     Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
     Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
-    p = p @ (Ry @ Rx).T
+    return p @ (Ry @ Rx).T
+
+
+def bins_from_points(points, drone_z, roll=0.0, pitch=0.0):
+    """depth-camera points [N, 3] in the camera frame (x forward, y left, z up, origin the optical
+    centre) -> [SCAN_BINS] metres. The points are levelled with the drone's roll and pitch, kept if
+    they are at least OBST_MIN_H above the floor (drone_z: base_link height) and inside the depth
+    range and horizontal field of view; each bin is the nearest horizontal range."""
+    p = level(points, roll, pitch)
     h = drone_z + DEPTH_Z + p[:, 2]
     rng = np.hypot(p[:, 0], p[:, 1])
     ang = np.arctan2(p[:, 1], p[:, 0])

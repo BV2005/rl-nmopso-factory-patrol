@@ -64,6 +64,15 @@ python scripts/eval_t.py --ckpt results/ckpt/vT3_seed1_best.pt --vg results/ckpt
 Models: `results/ckpt/vT3_seed{1,2,3}_best.pt`. Design, every fix, vT2 / vT3 results, paired times and full pod
 commands: `docs/time_optimal_rl.md` (vG: `docs/generalizable_rl.md`).
 
+**Gazebo + PX4 SITL test** (`docs/gazebo_vt.md`): vT3 flies the PATROL legs from the `x500_patrol` drone's rendered
+lidar and depth camera, with no map (`gazebo/nmopso_demo/vt_follower.py`, decision core `rlpatrol/vt_pilot.py`, flight
+scan `scan3d.flight_scan`). Offline first: `python scripts/test_vt_flight.py` (synthetic sensors; runs the ROS node
+itself under a fake ROS / PX4 layer). Then on an Ubuntu GPU pod:
+```bash
+MODEL=x500_patrol VT_CKPT=results/ckpt/vT3_seed1_best.pt TIMEOUT=2400 bash gazebo/fly_plan.sh gazebo/nmopso_demo/paths_rl_padsafe/patrol_paths.json
+python3 scripts/vt_flight_report.py "$(ls -d gazebo/nmopso_demo/run_logs/* | tail -1)"
+```
+
 ## Branches of this repository
 
 | Branch | Focus | Headline result |
