@@ -17,14 +17,18 @@ ROOT = Path(__file__).resolve().parent.parent
 DRONE_R = 0.3
 
 
-def obstacle_boxes():
+def obstacle_boxes(run=None):
     """[K, 5] boxes [xmin xmax ymin ymax top] metres: the obstacles, the low ones the patrol flies over,
-    and the four walls (data/factory2_model.json; numpy only, so it runs with the simulator's python)."""
+    and the four walls (data/factory2_model.json; numpy only, so it runs with the simulator's python), plus the
+    unexpected boxes spawned during the flight (gazebo/spawn_box.sh: <run>/extra_boxes.json)."""
     J = json.loads((ROOT / "data" / "factory2_model.json").read_text())
     h = J["hall"]
     walls = np.array([[h[0] - 0.3, h[0], h[2], h[3], 12], [h[1], h[1] + 0.3, h[2], h[3], 12],
                       [h[0], h[1], h[2] - 0.3, h[2], 12], [h[0], h[1], h[3], h[3] + 0.3, 12]])
-    return np.vstack([np.atleast_2d(np.array(J["rects"], float)), np.atleast_2d(np.array(J["overflown"], float)), walls])
+    extra = Path(run) / "extra_boxes.json" if run is not None else None
+    spawned = [b["box"] for b in json.loads(extra.read_text())] if extra is not None and extra.exists() else []
+    return np.vstack([np.atleast_2d(np.array(J["rects"], float)), np.atleast_2d(np.array(J["overflown"], float)), walls,
+                      *([np.array(spawned, float)] if spawned else [])])
 
 
 def load_states(run):
@@ -53,7 +57,7 @@ def main():
     ap.add_argument("run")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    boxes = obstacle_boxes()
+    boxes = obstacle_boxes(a.run)
     S, phases = load_states(a.run)
     rep = {"run": str(a.run), "drones": {}, "pairs": {}}
     for d, X in S.items():
