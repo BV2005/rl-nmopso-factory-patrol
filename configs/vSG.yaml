@@ -1,0 +1,26 @@
+# vSG: vS (configs/vS.yaml) with a GRU actor, for obstacle robustness.
+#   recurrent: the actor remembers the episode's earlier scans (obstacles passed, where the openings
+#              were) instead of deciding every node from the current scan alone;
+#   blocked_frac: 30 % of the training legs have a blocked straight line (rlpatrol.legs.blocked_legs),
+#              so the memory is trained on detours. The held-out benchmark legs (data/legs_*.mat) are
+#              drawn with other seeds.
+# Compare with vS on --legs blocked (vS seed 1: HV 0.458, 184/200 feasible; vB: 0.521-0.567).
+# To attribute the gain, also train the two halves: vS + blocked_frac only, and vS + recurrent only.
+#   python scripts/train.py --name vSG_seed1 --config configs/vSG.yaml --seed 1
+iters: 2000
+batch: 8192
+minibatch: 8192
+act_pen: 0.02
+budget: true
+budget_pen: 50.0
+dense: true
+budget_obs: false
+route_obs: false
+sensor_obs: true
+priv_critic: true
+sensor_noise: true
+recurrent: true
+gru_hidden: 128
+blocked_frac: 0.3
+device: cuda
+snapshot_every: 200

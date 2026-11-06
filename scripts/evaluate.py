@@ -32,7 +32,7 @@ from rlpatrol.env import F_SCALE, PathEnv  # noqa: E402
 from rlpatrol.metrics import add_eps, hypervolume, igd_plus, nondominated, short_safe  # noqa: E402
 from rlpatrol.nmopso_cost import ANGLE, N_NODES, Legs  # noqa: E402
 from rlpatrol.planner import BUDGET_PREFS, U_SWEEP, conditions, pref_set  # noqa: E402,F401  (shared with the online planner)
-from rlpatrol.ppo import Actor, net_shape  # noqa: E402
+from rlpatrol.ppo import env_kwargs, make_actor  # noqa: E402
 from rlpatrol.refine import WEIGHTS, cem  # noqa: E402
 from rlpatrol.world import DATA, load_world  # noqa: E402
 
@@ -41,9 +41,9 @@ TIE = 1e-3
 SCALE = F_SCALE.numpy()
 
 
-def rl_solve(actor, world, legs_m, prefs, budgets, S, seed=0, budget_obs=False, route_obs=False):
+def rl_solve(actor, world, legs_m, prefs, budgets, S, seed=0, budget_obs=False, route_obs=False, **obs_kw):
     """all legs at once: per leg (F [m, 4], enc [m, 3, n]) of all rollouts (actor None: zero action),
-    and the wall time."""
+    and the wall time. obs_kw: further PathEnv observation options (sensor_obs, sensor_spec)."""
     torch.manual_seed(seed)
     C, nL, rep = len(prefs), len(legs_m), 1 + S
     Lr = np.repeat(legs_m, C * rep, 0)
@@ -52,12 +52,16 @@ def rl_solve(actor, world, legs_m, prefs, budgets, S, seed=0, budget_obs=False, 
     det = torch.tensor(([True] * C + [False] * C * S) * nL)
     t0 = time.perf_counter()
     env = PathEnv(world, world.to_units(Lr[:, :3]), world.to_units(Lr[:, 3:]), pr, budget=bu, budget_obs=budget_obs,
-                  route_obs=route_obs)
+                  route_obs=route_obs, **obs_kw)
     enc = []
+    if actor:
+        actor.reset(len(Lr))
     for _ in range(N_NODES):
         with torch.no_grad():
             o = env.obs()
             a = torch.where(det[:, None], actor.act(o, True)[0], actor.act(o)[0]) if actor else torch.zeros(len(Lr), 3)
+            if actor:
+                actor.commit()
         enc.append(torch.stack(env.act(a), -1))                    # r, psi, phi
         env.step(a)
     F = env.legs.cost(env.nodes).numpy()
@@ -65,6 +69,12 @@ def rl_solve(actor, world, legs_m, prefs, budgets, S, seed=0, budget_obs=False, 
     enc = torch.stack(enc, -1).numpy()                              # [B, 3, n]
     m = C * rep
     return [(F[i * m:(i + 1) * m], enc[i * m:(i + 1) * m]) for i in range(nL)], wall
+
+
+def sensor_kw(cfg, noise=False):
+    """rl_solve's sensor options of a checkpoint's cfg (noise False: ideal sensors)."""
+    kw = env_kwargs(cfg, noise=noise, critic=False)
+    return {k: kw[k] for k in ("sensor_obs", "sensor_spec")}
 
 
 def random_search(world, legs_m, m, seed=0):
@@ -130,6 +140,8 @@ def main():
     ap.add_argument("--S", type=int, default=3)
     ap.add_argument("--refine", action="store_true")
     ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--sensor_noise", action="store_true",
+                    help="sensor-input checkpoints: simulate sensor noise (default: ideal sensors)")
     ap.add_argument("--tag", default=None, help="output tag (default <ckpt stem>_<legs>[_ls])")
     ap.add_argument("--overwrite", action="store_true", help="replace existing results/eval_<tag>.json")
     a = ap.parse_args()
@@ -143,11 +155,11 @@ def main():
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
     budget = ck["cfg"].get("budget", False)
     bobs, robs = ck["cfg"].get("budget_obs", False), ck["cfg"].get("route_obs", False)
-    ctx, extra = net_shape(ck["cfg"])
-    actor = Actor(ck["cfg"]["hidden"], ctx=ctx, extra=extra); actor.load_state_dict(ck["actor"]); actor.eval()
+    actor = make_actor(ck["cfg"]); actor.load_state_dict(ck["actor"]); actor.eval()
     prefs, budgets = conditions(budget, a.K)
-    sols, wall = rl_solve(actor, world, legs_m, prefs, budgets, a.S, budget_obs=bobs, route_obs=robs)
-    t0 = time.perf_counter(); rl_solve(actor, world, legs_m[:1], prefs, budgets, a.S, budget_obs=bobs, route_obs=robs)
+    skw = sensor_kw(ck["cfg"], a.sensor_noise)
+    sols, wall = rl_solve(actor, world, legs_m, prefs, budgets, a.S, budget_obs=bobs, route_obs=robs, **skw)
+    t0 = time.perf_counter(); rl_solve(actor, world, legs_m[:1], prefs, budgets, a.S, budget_obs=bobs, route_obs=robs, **skw)
     lat = time.perf_counter() - t0
     straight, _ = rl_solve(None, world, legs_m, prefs[:1], None if budgets is None else budgets[:1], 0)
     sols = [(np.vstack([F, straight[k][0]]), np.concatenate([e, straight[k][1]])) for k, (F, e) in enumerate(sols)]

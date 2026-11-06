@@ -229,6 +229,12 @@ class PatrolFollower(Node):
             self.yield_since = None
         return bool(peers)
 
+    def extend_track(self, now, pos):
+        """called when the carrot has reached the end of the current track; True while the track is
+        still being extended online (the drone must not treat its end as the end of the phase).
+        The planned demo flies fixed tracks: never."""
+        return False
+
     def emit(self, event, detail=''):
         """publishes an event for patrol_recorder.py"""
         m = String()
@@ -302,6 +308,9 @@ class PatrolFollower(Node):
             # the next phase starts only once the drone has reached the end of the track (not just
             # the carrot, which leads by up to max_lead) and every task stop on it is done
             pending = self.phase == 'PATROL' and self.stop_i < len(self.stops)
+            # a track planned while it is flown (sensor_follower.py) is not finished at its current end
+            if self.s >= self.loop_len and self.extend_track(now, pos):
+                pending = True
             if self.s >= self.loop_len and math.dist(pos, self.wp[-1]) < 0.3 and not pending:
                 if self.phase == 'TRANSIT_IN':
                     self.set_track('PATROL')
