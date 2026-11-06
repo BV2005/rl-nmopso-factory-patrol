@@ -1,4 +1,60 @@
-# RL proposals for multi-objective UAV path planning: making NMOPSO fast enough for factory patrol
+# Sensor drone and sensor-input RL leg planner (branch `physical-ai-robust-rl`)
+
+`main` plans every patrol leg offline on the **known map**; its drones are stock GPS x500s with no perception
+sensors. This branch makes the planner physical:
+
+1. **The drone**: `gazebo/models/x500_patrol`, an x500 with a 270° 2D lidar and a forward stereo-depth + RGB
+   camera (OAK-D Lite class), on a Jetson-class companion computer (ROS 2 Jazzy, PX4 offboard over uXRCE-DDS).
+2. **A policy whose inputs are those sensors (vS)**: `rlpatrol/sensors.py` fuses lidar and depth into a 27-bin
+   range scan; `PathEnv(sensor_obs=True)` gives the actor only that scan and the leg geometry (no map), with a
+   privileged critic (exact geometry) during training; `configs/vS.yaml`.
+3. **Closed-loop flight**: `gazebo/nmopso_demo/sensor_follower.py` plans each leg in flight, one node per scan,
+   behind a `segment_clear` safety check.
+
+## Results (NMOPSO's objectives, hypervolume of the proposals; `scripts/evaluate.py`, seed 1 unless noted)
+
+| Policy | Inputs | real legs (73) HV | random legs (200) HV, feasible | blocked legs (200) HV, feasible |
+|---|---|---|---|---|
+| vB (seeds 1–3) | the map | 1.030–1.049 | 0.948–0.974, 192–193 | 0.521–0.567, 185–186 |
+| **vS** | sensors only | **1.011** (1.023 with sensor noise) | **0.909**, 190 | 0.458, 184 |
+| vSb (vS + 30 % blocked training legs) | sensors | 0.984 | 0.894, 185 | 0.429, 178 |
+| vSr (GRU memory) | sensors | 1.003 | 0.913, 190 | 0.450, 181 |
+| vSG (GRU + blocked legs) | sensors | 0.973 | 0.896, 184 | 0.440, 176 |
+
+- From sensors alone, vS is 2–4 % behind the map policy (HV) on the real patrol legs and 4–7 % on random
+  legs; sensor noise does not hurt it.
+- On blocked legs (detours) it is 12–19 % behind: the scan cannot show the far side of an obstacle.
+- Memory (GRU) and blocked training legs did **not** help. That led to `generalizable-rl` (train on many
+  worlds) and `time-optimal-rl` (drop NMOPSO's 10-node encoding, which cannot express long detours).
+- vS trained in 10.7 min on an RTX 5090 (2000 iterations); planning ~0.5 s per leg.
+
+## How to run
+```bash
+python scripts/test_sensors.py --device cuda     # sensor geometry, converters, env, training, planner
+python scripts/smoke_test.py --device cuda       # the base pipeline still passes
+python scripts/train.py --name vS_seed1 --config configs/vS.yaml --seed 1
+python scripts/evaluate.py --ckpt results/ckpt/vS_seed1.pt --legs real            # also --legs random / blocked
+python scripts/evaluate.py --ckpt results/ckpt/vS_seed1.pt --legs real --sensor_noise --tag vS_seed1_real_noise
+# fly it (Ubuntu + Gazebo Harmonic + PX4; see docs/cloud_gpu.md)
+MODEL=x500_patrol SENSOR_CKPT=results/ckpt/vS_seed1.pt bash gazebo/fly_plan.sh gazebo/nmopso_demo/paths_rl_padsafe/patrol_paths.json
+```
+Design: `docs/drone_architecture.md`. GPU set-up, training, sensor checks and Gazebo flights: `docs/cloud_gpu.md`.
+
+## Branches of this repository
+
+| Branch | Focus | Headline result |
+|---|---|---|
+| [`main`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/main) | PPO on NMOPSO's own problem (same encoding, bounds, cost), planning on the known map | RL proposals in 0.07–0.2 s per leg; vB within 1 % of NMOPSO-500's hypervolume at ~1/5000 of its time |
+| [`physical-ai-robust-rl`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/physical-ai-robust-rl) | sensor drone `x500_patrol` (2D lidar, depth + RGB camera) and a policy whose inputs are those sensors (vS) | vS ≈ the map policy vB on real legs (HV 1.011 vs 1.03–1.05), behind on blocked legs (0.458 vs 0.52–0.57) |
+| [`global-local-planner`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/global-local-planner) | vB global route on the prior map + a VFH+ / vS local tier + obstacle memory | work in progress, not evaluated |
+| [`generalizable-rl`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/generalizable-rl) | vG: one policy trained on procedurally generated factories, climb / backtrack actions | vG4: 88 % success on held-out worlds, 94 % out-of-distribution, 76–80 % on blocked legs |
+| [`time-optimal-rl`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/time-optimal-rl) | vT: encoding-free planner that minimises flight time with a flyable turn bound | vT3: 95–100 % success on every set, above every other method incl. vB with the full map; 0 % turn-rate violations |
+
+---
+
+# Base project (branch `main`): RL proposals for multi-objective UAV path planning: making NMOPSO fast enough for factory patrol
+
+Everything below is the base project this branch builds on (results on the known map, set-up, reproduction, licences).
 
 Three PX4 x500 drones patrol a 30 × 20 m factory (Gazebo world `worlds/factory2.sdf`: four 3.5 m
 storage racks, a partition, assembly machines). Every leg between two patrol points is a
