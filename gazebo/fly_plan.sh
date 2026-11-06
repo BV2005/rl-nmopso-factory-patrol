@@ -4,6 +4,7 @@
 # collision check (flight_check.json) on the recorded 10 Hz states.
 #   bash gazebo/fly_plan.sh gazebo/nmopso_demo/paths_rl_padsafe/patrol_paths.json
 #   HEADLESS=0 bash gazebo/fly_plan.sh <plan>        # with the Gazebo GUI (TOPVIEW=1: top view)
+#   TIMEOUT=1800 bash gazebo/fly_plan.sh <plan>      # wall-clock limit of the flight in s (default 900)
 # Needs the stack of gazebo/setup_sim.sh (PX4_DIR, PX4_MSGS_WS as there); the collision check needs
 # only numpy.
 set -uo pipefail
@@ -13,7 +14,7 @@ PLAN="$(realpath "$1")"
 DEMO="$HERE/nmopso_demo"
 mkdir -p "$DEMO/run_logs"
 before=$(ls "$DEMO/run_logs" | sort | tail -1)
-PATHS="$PLAN" HEADLESS="${HEADLESS:-1}" LAPS="${LAPS:-1}" SPEED="${SPEED:-1.0}" timeout 900 "$DEMO/run_demo.sh"
+PATHS="$PLAN" HEADLESS="${HEADLESS:-1}" LAPS="${LAPS:-1}" SPEED="${SPEED:-1.0}" timeout "${TIMEOUT:-900}" "$DEMO/run_demo.sh"
 echo "run_demo exit $?"
 run=$(ls "$DEMO/run_logs" | sort | tail -1)
 [ "$run" = "$before" ] && { echo "no new run folder"; exit 1; }

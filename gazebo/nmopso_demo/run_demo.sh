@@ -22,6 +22,10 @@
 #                                           sensor-input policy (sensor_follower.py) instead of flown
 #                                           from the plan; transits as planned. BUDGET=0.6 threat budget,
 #                                           CLOUD_FRAME=optical if the depth points are z-forward
+#   MODEL=x500_patrol VT_CKPT=results/ckpt/vT3_seed1_best.pt nmopso_demo/run_demo.sh
+#                                           PATROL legs flown one vT waypoint at a time from the sensors
+#                                           (vt_follower.py, rlpatrol/vt_pilot.py); transits as planned.
+#                                           CLOUD_FRAME as above; summary: scripts/vt_flight_report.py <run dir>
 #
 # worlds/factory.sdf is the factory2 world (= worlds/factory2.sdf of the repository) as given (it already has the magnetometer, IMU,
 # NavSat and air-pressure systems PX4 needs). PX4 is started like
@@ -39,9 +43,15 @@ LAPS="${LAPS:-1}"
 SPEED="${SPEED:-1.0}"
 MODEL="${MODEL:-x500}"                       # x500 (stock, GPS) | x500_patrol (sensor drone)
 SENSOR_CKPT="${SENSOR_CKPT:-}"               # a sensor_obs checkpoint: fly PATROL legs with sensor_follower.py
+VT_CKPT="${VT_CKPT:-}"                       # a vT checkpoint: fly PATROL legs with vt_follower.py
 if [ -n "$SENSOR_CKPT" ]; then
     SENSOR_CKPT="$(realpath "$SENSOR_CKPT")"
     [ "$MODEL" = "x500_patrol" ] || { echo "[run_demo] SENSOR_CKPT needs MODEL=x500_patrol"; exit 1; }
+fi
+if [ -n "$VT_CKPT" ]; then
+    VT_CKPT="$(realpath "$VT_CKPT")"
+    [ "$MODEL" = "x500_patrol" ] || { echo "[run_demo] VT_CKPT needs MODEL=x500_patrol"; exit 1; }
+    [ -z "$SENSOR_CKPT" ] || { echo "[run_demo] set SENSOR_CKPT or VT_CKPT, not both"; exit 1; }
 fi
 mkdir -p "$LOGS"
 cp "$PATHS" "$LOGS/patrol_paths.json"
@@ -137,7 +147,12 @@ PIDS+=($RECORDER)
 FOLLOWERS=()
 for h in "${HOMES[@]}"; do
     read -r ID X Y <<< "$h"
-    if [ -n "$SENSOR_CKPT" ]; then
+    if [ -n "$VT_CKPT" ]; then
+        PYTHONPATH="$REPO/..:$DEMO${PYTHONPATH:+:$PYTHONPATH}" python3 "$DEMO/vt_follower.py" --ros-args \
+            -p drone_id:="$ID" -p paths_file:="$PATHS" -p log_file:="$LOGS/trace_drone$ID.csv" -p laps:="$LAPS" \
+            -p speed:="$SPEED" -p ckpt:="$VT_CKPT" -p cloud_frame:="${CLOUD_FRAME:-flu}" \
+            > "$LOGS/follower_drone$ID.log" 2>&1 &
+    elif [ -n "$SENSOR_CKPT" ]; then
         PYTHONPATH="$REPO/..:$DEMO${PYTHONPATH:+:$PYTHONPATH}" python3 "$DEMO/sensor_follower.py" --ros-args \
             -p drone_id:="$ID" -p paths_file:="$PATHS" -p log_file:="$LOGS/trace_drone$ID.csv" -p laps:="$LAPS" \
             -p speed:="$SPEED" -p ckpt:="$SENSOR_CKPT" -p budget:="${BUDGET:-0.6}" \
