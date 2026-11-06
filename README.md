@@ -1,4 +1,38 @@
-# RL proposals for multi-objective UAV path planning: making NMOPSO fast enough for factory patrol
+# Global-local planner (branch `global-local-planner`, work in progress)
+
+The sensor-input policy of `physical-ai-robust-rl` (vS) is good on familiar legs but behind the map policy on
+detours: a local planner cannot see the far side of an obstacle. This branch combines the two:
+
+- **global tier**: vB (the map policy of `main`) plus an A* route split (`LegPlanner.plan_route`) on the prior
+  map and an obstacle memory (`rlpatrol/obstacle_memory.py`) that adds what the sensors saw in flight;
+- **local tier**: VFH+ (`rlpatrol/local_planner.py`) or vS, from the live scan;
+- **follower**: `gazebo/nmopso_demo/global_local_follower.py` (replans when the memory changes);
+  `scripts/spawn_obstacle.sh` drops unexpected obstacles into the Gazebo world;
+- **tests**: `scripts/test_global_local.py` (offline flight harness).
+
+**Status:** work in progress, **not evaluated**. Known problem at the last commit: the local tier gets stuck in
+narrow aisles and behind wide obstacles. vT3 from [`time-optimal-rl`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/time-optimal-rl) (95–100 % success, flyable turns)
+is the natural local tier for this architecture — the next step for this branch.
+```bash
+python scripts/test_global_local.py
+```
+Design: `docs/drone_architecture.md`.
+
+## Branches of this repository
+
+| Branch | Focus | Headline result |
+|---|---|---|
+| [`main`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/main) | PPO on NMOPSO's own problem (same encoding, bounds, cost), planning on the known map | RL proposals in 0.07–0.2 s per leg; vB within 1 % of NMOPSO-500's hypervolume at ~1/5000 of its time |
+| [`physical-ai-robust-rl`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/physical-ai-robust-rl) | sensor drone `x500_patrol` (2D lidar, depth + RGB camera) and a policy whose inputs are those sensors (vS) | vS ≈ the map policy vB on real legs (HV 1.011 vs 1.03–1.05), behind on blocked legs (0.458 vs 0.52–0.57) |
+| [`global-local-planner`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/global-local-planner) | vB global route on the prior map + a VFH+ / vS local tier + obstacle memory | work in progress, not evaluated |
+| [`generalizable-rl`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/generalizable-rl) | vG: one policy trained on procedurally generated factories, climb / backtrack actions | vG4: 88 % success on held-out worlds, 94 % out-of-distribution, 76–80 % on blocked legs |
+| [`time-optimal-rl`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/time-optimal-rl) | vT: encoding-free planner that minimises flight time with a flyable turn bound | vT3: 95–100 % success on every set, above every other method incl. vB with the full map; 0 % turn-rate violations |
+
+---
+
+# Base project (branch `main`): RL proposals for multi-objective UAV path planning: making NMOPSO fast enough for factory patrol
+
+Everything below is the base project this branch builds on (results on the known map, set-up, reproduction, licences).
 
 Three PX4 x500 drones patrol a 30 × 20 m factory (Gazebo world `worlds/factory2.sdf`: four 3.5 m
 storage racks, a partition, assembly machines). Every leg between two patrol points is a
@@ -12,40 +46,6 @@ with 3 drones in **Gazebo + PX4 SITL**.
 
 Everything needed to reproduce the results is here: code, the authors' NMOPSO (unmodified), the
 factory planner, the world, trained models, every NMOPSO run and the flight logs.
-
-## Branches and where the project stands
-
-`main` is the published result below: PPO trained on NMOPSO's own problem, planning on the **known map**. The
-other branches turn it into a sensor-driven, generalising, time-optimal planner. Every result is in simulation
-(procedurally generated factories and the factory2 benchmark legs); none of the extensions has been flown in
-Gazebo / PX4 yet.
-
-| Branch | What it adds | Status and headline result |
-|---|---|---|
-| [`main`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/main) | PPO on NMOPSO's problem (same encoding, bounds and cost), map known | done; results below |
-| [`physical-ai-robust-rl`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/physical-ai-robust-rl) | sensor drone `x500_patrol` (2D lidar, depth + RGB camera); policy whose inputs are the sensors (vS); GRU and blocked-leg variants | vS ≈ the map policy vB on real legs (HV 1.011 vs 1.03–1.05) and random legs (0.909 vs 0.95–0.97), behind on blocked legs (0.458 vs 0.52–0.57); the GRU and blocked-leg training did not help |
-| [`global-local-planner`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/global-local-planner) | vB global route on the prior map + a local tier (VFH+ / vS) + obstacle memory | work in progress, not evaluated |
-| [`generalizable-rl`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/generalizable-rl) | vG: PPO on procedurally generated factories (prioritized level replay, domain randomisation), climb / backtrack actions, box + 0.5 m collision model, review fixes | vG4 (2 seeds): success 88 % held-out worlds, 94 % out-of-distribution worlds, 100 % factory2 real, 86–88 % random, 75–80 % blocked legs; NMOPSO's 10-node encoding caps long detours |
-| [`time-optimal-rl`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/time-optimal-rl) | vT: encoding-free, step-wise planner that minimises **flight time** (turn ≤ 45° and ≤ 45° per 0.5 m), dense time reward, stable PPO (lr decay, KL stop, std floor), validation-selected checkpoints, one flight-time judge for every method | **vT3 (3 seeds): success 95.3 % held-out, 96.8 % OOD, 100 % real, 97.5 % random, 94.5 % blocked** — above every other method, including vB with the full map; 0 % turn-rate violations (others 2–59 %); on the legs every method completes the fastest on 4 of 5 sets and ~35 % less flight time on the real patrol legs; vB stays faster on average on blocked legs (wrong-way detours around unseen blockages) |
-
-vT3 against the others (shared judge, same legs; success %, time / straight-line time on each method's own successes):
-
-| Set | vT3 (3 seeds) | vG4 | vS | vB (full map) |
-|---|---|---|---|---|
-| held-out worlds | **95.3** · 1.36 | 87.9 · 1.28 | 89.5 · 1.32 | 91.3 · 1.19 |
-| OOD worlds | **96.8** · 1.19 | 93.5 · 1.27 | 94.1 · 1.29 | 95.7 · 1.14 |
-| factory2 real legs | **100** · **1.11** | 100 · 1.59 | 100 · 1.66 | 100 · 1.70 |
-| factory2 random legs | **97.5** · 1.40 | 85.5 · 1.45 | 93.5 · 1.45 | 97.0 · 1.32 |
-| factory2 blocked legs | **94.5** · 1.77 | 75.0 · 1.76 | 87.5 · 1.66 | 93.5 · 1.52 |
-
-Paired on the legs every method completes, vT3's time / straight is 1.09 (held-out), 1.08 (OOD), 1.08–1.16 (real),
-1.17 (random), 1.45–1.53 (blocked) against vB's 1.16, 1.12, 1.70, 1.27, 1.44 — details, caveats (single-seed
-baselines, a simplified time model to be validated against PX4) and commands in
-[`docs/time_optimal_rl.md`](https://github.com/BV2005/rl-nmopso-factory-patrol/blob/time-optimal-rl/docs/time_optimal_rl.md).
-
-**On this branch (work in progress):** the global-local architecture (vB on the prior map + a VFH+ / vS local
-tier + obstacle memory), not evaluated yet. vT3 from `time-optimal-rl` is the natural local tier for it.
-Design: `docs/drone_architecture.md`.
 
 ## Results
 
