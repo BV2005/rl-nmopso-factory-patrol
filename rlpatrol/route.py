@@ -72,12 +72,12 @@ def _build(world):
 def route_table(world):
     """the world's route table (cached in memory per device and on disk in data/route_<sig>.pt)."""
     dev = world.threats.device
+    key = (id(world), str(dev))
+    if key in _ROUTE_TABLES:
+        return _ROUTE_TABLES[key]
     th = world.threats.detach().cpu()
     sig = hashlib.sha1(th.numpy().tobytes() + np.asarray(world.bounds).tobytes()
                        + f"{CELL} {DRONE}".encode()).hexdigest()[:12]
-    key = (sig, str(dev))              # by content: id(world) is reused once a world is freed
-    if key in _ROUTE_TABLES:
-        return _ROUTE_TABLES[key]
     cache = DATA / f"route_{sig}.pt"
     if cache.exists():
         tab = torch.load(cache, map_location="cpu")
