@@ -14,7 +14,7 @@ PLAN="$(realpath "$1")"
 DEMO="$HERE/nmopso_demo"
 mkdir -p "$DEMO/run_logs"
 before=$(ls "$DEMO/run_logs" | sort | tail -1)
-PATHS="$PLAN" HEADLESS="${HEADLESS:-1}" LAPS="${LAPS:-1}" SPEED="${SPEED:-1.0}" timeout "${TIMEOUT:-900}" "$DEMO/run_demo.sh"
+PATHS="$PLAN" HEADLESS="${HEADLESS:-1}" LAPS="${LAPS:-1}" SPEED="${SPEED:-1.0}" timeout "${TIMEOUT:-900}" bash "$DEMO/run_demo.sh"
 echo "run_demo exit $?"
 run=$(ls "$DEMO/run_logs" | sort | tail -1)
 [ "$run" = "$before" ] && { echo "no new run folder"; exit 1; }
