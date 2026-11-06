@@ -35,14 +35,6 @@ Observation option (route_obs, round B): ROUTE_OBS entries before the budget sta
 precomputed shortest collision-free routes (rlpatrol/route.py): cos and sin of the route waypoint's
 bearing relative to the goal bearing (1, 0 whenever the goal is visible), the route length left over
 the reach left (segments left x VarMax.r; > 1: the goal is out of reach), and over the straight distance.
-Observation option (sensor_obs, x500_patrol): the policy sees only what the drone can sense. The 16
-oracle rays are replaced by the SCAN_BINS fused lidar + depth-camera bins of rlpatrol/sensors.py
-(relative to the drone's heading, the chain heading: the direction of the segment just flown, which
-patrol_follower.py yaws along), simulated against the true obstacle boxes with sensor noise; route_obs
-and budget_obs (whole-map knowledge) are not allowed. A deployment sets scan_override to the real
-scan before each obs(). With priv (asymmetric actor-critic) obs_pair() also returns the critic's
-observation: the actor's plus the privileged oracle features (the 16 exact rays, the route features
-and, with budget conditioning, the budget state), before the conditioning entries.
 """
 import hashlib
 import math
@@ -53,7 +45,6 @@ import torch
 from .world import DATA
 from .nmopso_cost import ANGLE, DANGER, DRONE, N_NODES, Legs, tmat
 from .route import route_features
-from .sensors import SCAN_BINS, SensorSpec, scene_boxes, sim_scan, units_to_m
 
 N_RAYS = 16
 RAY_MAX = 40.0                         # units (4 m)
@@ -67,7 +58,6 @@ OBS_DIM = 3 + 1 + 1 + 3 + 1 + 1 + 1 + 2 + N_RAYS + 4      # + 1 (threat budget u
 BUDGET_PEN = 5.0                                 # per F_SCALE[1] of threat above the budget
 BUDGET_OBS = 2                                   # extra observation entries with budget_obs
 ROUTE_OBS = 4                                    # extra observation entries with route_obs
-SENSOR_OBS = SCAN_BINS - N_RAYS                  # extra observation entries with sensor_obs (scan replaces rays)
 N_SEGS = N_NODES + 1                             # start -> node 1 -> ... -> node n -> goal
 
 
@@ -79,12 +69,12 @@ def ray_table(world):
     """[ny, nx, RAY_DIRS] float32: from every unit cell centre (x, y = 0 .. mapsize), the distance along
     each global direction to the first drone-inflated cylinder or the map bounds, / RAY_MAX, capped at 1."""
     dev = world.threats.device
+    key = (id(world), str(dev))
+    if key in _RAY_TABLES:
+        return _RAY_TABLES[key]
     th = world.threats.detach().cpu()
     sig = hashlib.sha1(th.numpy().tobytes() + np.asarray(world.bounds).tobytes()
                        + f"{RAY_DIRS} {RAY_MAX} {DRONE}".encode()).hexdigest()[:12]
-    key = (sig, str(dev))              # by content: id(world) is reused once a world is freed
-    if key in _RAY_TABLES:
-        return _RAY_TABLES[key]
     cache = DATA / f"raytable_{sig}.pt"
     if cache.exists():
         _RAY_TABLES[key] = torch.load(cache, map_location="cpu").to(dev)
@@ -163,22 +153,12 @@ def seg_threat(world, P):
 
 class PathEnv:
     def __init__(self, world, start, goal, pref, shape=0.0, scalar="linear", act_pen=0.0, budget=None, budget_pen=BUDGET_PEN,
-                 dense=False, budget_obs=False, route_obs=False, soft_cap=False, sensor_obs=False, priv=False,
-                 sensor_spec=None):
+                 dense=False, budget_obs=False, route_obs=False, soft_cap=False):
         """budget: None, or u [B] - threat-budget conditioning: the path should keep F2 <= u * F2 of
         the straight (zero-action) path (its F2 without the collision infinity); u is observed.
-        dense, budget_obs, route_obs, soft_cap, sensor_obs, priv: see the module doc.
-        sensor_spec: rlpatrol.sensors.SensorSpec of the simulated scan (default: with noise)."""
+        dense, budget_obs, route_obs, soft_cap: see the module doc."""
         if budget_obs and budget is None:
             raise ValueError("budget_obs needs budget conditioning")
-        if sensor_obs and (route_obs or budget_obs):
-            raise ValueError("sensor_obs: route_obs and budget_obs are whole-map (oracle) features the drone "
-                             "cannot sense; give them to the critic with priv=True instead")
-        if priv and not sensor_obs:
-            raise ValueError("priv (privileged critic) is for sensor_obs; without it the actor already sees everything")
-        self.sensor_obs, self.priv = sensor_obs, priv
-        self.sensor_spec = sensor_spec or SensorSpec()
-        self.scan_override = None                                           # [B, SCAN_BINS]: the real scan (flight)
         if dense and scalar != "linear":
             raise ValueError("dense threat needs the linear scalarisation (a max does not split by segment)")
         self.legs = Legs(world, start, goal)
@@ -227,9 +207,7 @@ class PathEnv:
     def segs_left(self):
         return N_NODES - self.i + 1                                         # this node ... goal
 
-    def _core(self):
-        """the observation entries every variant shares (goal, reach, height, ... heading), the goal
-        bearing from q and the chain heading (both world ENU, rad)."""
+    def obs(self):
         P = self.pose()
         R, p = P[:, :3, :3], P[:, :3, 3]
         D = self.legs.dist[:, None]
@@ -240,44 +218,17 @@ class PathEnv:
         off = ((self.q - p) / 10).clamp(-2, 2)                              # clamping offset (m)
         left = torch.full_like(D, (N_NODES - self.i) / N_NODES)
         bear = torch.atan2(self.legs.goal[:, 1] - self.q[:, 1], self.legs.goal[:, 0] - self.q[:, 0])
-        heading = torch.atan2(R[:, 1, 0], R[:, 0, 0])
-        head = heading - bear                                               # chain heading vs goal bearing
-        core = [g, reach, zc, off, left, D / 100, self.legs.rmax[:, None] / RAY_MAX,
-                torch.cos(head)[:, None], torch.sin(head)[:, None]]
-        return core, bear, heading
+        head = torch.atan2(R[:, 1, 0], R[:, 0, 0]) - bear                   # chain heading vs goal bearing
+        o = torch.cat([g, reach, zc, off, left, D / 100, self.legs.rmax[:, None] / RAY_MAX,
+                       torch.cos(head)[:, None], torch.sin(head)[:, None],
+                       self.rays(self.q, bear)] + self.route_state(bear) + self.budget_state()
+                      + ([self.u[:, None]] if self.u is not None else [])
+                      + [self.pref], -1)
+        return o.float()
 
-    def _ctx(self):
-        return ([self.u[:, None]] if self.u is not None else []) + [self.pref]
-
-    def scan(self, heading):
-        """[B, SCAN_BINS] the fused sensor scan at q facing heading: scan_override if set (flight),
-        else simulated against the true obstacle boxes (rlpatrol/sensors.py)."""
-        if self.scan_override is not None:
-            s = torch.as_tensor(self.scan_override, device=self.q.device)
-            return s.to(self.q.dtype).reshape(len(self.q), SCAN_BINS)
-        return sim_scan(scene_boxes(self.w), units_to_m(self.w, self.q), heading, self.sensor_spec).to(self.q.dtype)
-
-    def obs(self):
-        return self.obs_pair()[0]
-
-    def obs_pair(self):
-        """(actor observation, critic observation), float32; equal unless priv."""
-        core, bear, heading = self._core()
-        ctx = self._ctx()
-        if not self.sensor_obs:
-            o = torch.cat(core + [self.rays(self.q, bear)] + self.route_state(bear) + self.budget_state() + ctx, -1).float()
-            return o, o
-        s = self.scan(heading)
-        o = torch.cat(core + [s] + ctx, -1).float()
-        if not self.priv:
-            return o, o
-        priv = ([self.rays(self.q, bear)] + self.route_state(bear, force=True)
-                + (self.budget_state(force=True) if self.u is not None else []))
-        return o, torch.cat(core + [s] + priv + ctx, -1).float()
-
-    def route_state(self, bear, force=False):
+    def route_state(self, bear):
         """[] or [cos, sin of the waypoint bearing - goal bearing, route left / reach left, route left / straight]."""
-        if not (self.route_obs or force):
+        if not self.route_obs:
             return []
         wp, L = route_features(self.w, self.q[:, :2], self.legs.goal[:, :2])
         rel = torch.atan2(wp[:, 1] - self.q[:, 1], wp[:, 0] - self.q[:, 0]) - bear
@@ -286,9 +237,9 @@ class PathEnv:
         detour = (L / straight.clamp_min(1e-6)).nan_to_num(4.0).clamp(1, 4) - 1
         return [torch.cos(rel)[:, None], torch.sin(rel)[:, None], reach[:, None], detour[:, None]]
 
-    def budget_state(self, force=False):
+    def budget_state(self):
         """[] or [budget left, straight threat to go] ([B, 1] each, F_SCALE[1] units, clamped to +-5)."""
-        if not (self.budget_obs or force):
+        if not self.budget_obs:
             return []
         n = self.segs_left()
         t = torch.linspace(0, 1, n + 1, dtype=self.q.dtype, device=self.q.device)[None, :, None]

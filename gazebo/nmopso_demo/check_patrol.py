@@ -59,9 +59,6 @@ def main(run):
         for phase, key in (('TRANSIT_IN', 'transit_in'), ('PATROL', 'waypoints'), ('TRANSIT_OUT', 'transit_out')):
             rows = [r for r in tr if r['phase'] == phase]
             wp = [tuple(p) for p in (d.get(key) or [])]
-            online = run / f"trace_drone{d['id']}_track.json"         # sensor_follower.py: the track it planned
-            if phase == 'PATROL' and online.exists():
-                wp = [tuple(p) for p in json.load(open(online))['PATROL']]
             if len(wp) < 2:
                 continue
             if not rows:
