@@ -194,6 +194,34 @@ def _depth_columns(points, cell=math.radians(0.25), depth=0.3):
     return p[start, :2], top[cells]
 
 
+def reframe(lidar_xy, depth_points, pose, at):
+    """sensor points taken at pose = (x, y, z, yaw) (world ENU, base_link) re-expressed as if taken at `at` = (x, y, z, yaw):
+    lidar points [N, 2] in the drone frame, levelled depth points [M, 3] in the camera frame (origin the optical centre,
+    DEPTH_X ahead of base_link). flight_scan(..., drone_z=at z, yaw=at yaw) then gives the scan at `at`: what the
+    drone sees there of everything it sees now (vt_follower decides a waypoint ahead without stopping at it)."""
+    import numpy as np
+    x0, y0, z0, h0 = (float(v) for v in pose)
+    x1, y1, z1, h1 = (float(v) for v in at)
+    c0, s0, c1, s1 = math.cos(h0), math.sin(h0), math.cos(h1), math.sin(h1)
+
+    def to_world(p, ox, oy):
+        return np.c_[ox + c0 * p[:, 0] - s0 * p[:, 1], oy + s0 * p[:, 0] + c0 * p[:, 1]]
+
+    def to_at(w, ox, oy):
+        dx, dy = w[:, 0] - ox, w[:, 1] - oy
+        return np.c_[c1 * dx + s1 * dy, -s1 * dx + c1 * dy]
+
+    lid = None
+    if lidar_xy is not None:
+        lid = to_at(to_world(np.asarray(lidar_xy, float).reshape(-1, 2), x0, y0), x1, y1)
+    dep = None
+    if depth_points is not None:
+        p = np.asarray(depth_points, float).reshape(-1, 3)
+        w = to_world(p, x0 + S.DEPTH_X * c0, y0 + S.DEPTH_X * s0)
+        dep = np.c_[to_at(w, x1 + S.DEPTH_X * c1, y1 + S.DEPTH_X * s1), p[:, 2] + (z0 - z1)]
+    return lid, dep
+
+
 def flight_scan(lidar_xy=None, depth_points=None, drone_z=1.8, margin=0.0, yaw=0.0, beams_per_bin=40, beams=False):
     """the scan of sim_scan_b(margin=...) from real sensor data, without noise or dropout (flight):
       lidar_xy      [N, 2] lidar returns in the drone frame (x forward, y left; origin base_link = the lidar),

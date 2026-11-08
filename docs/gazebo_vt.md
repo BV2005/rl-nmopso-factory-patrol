@@ -114,16 +114,22 @@ Bring the results home: `tar czf flight_vt.tgz gazebo/nmopso_demo/run_logs/<run>
 
 ## Parameters (`vt_follower.py`, `--ros-args -p name:=value`)
 
+`flow` (true: fly through the waypoints), `lookahead` (0.6 m: decide this far before a waypoint),
 `ckpt` (vT checkpoint), `pref` (3 weights over time, threat, altitude; default 1/3 each), `radius` (0.1 m: scan check
 around the segment, on top of the 0.5 m margin), `samples` (16), `arrive_dist` (0.25 m), `settle` (0.3 s at a
-waypoint before scanning), `yaw_tol` (0.15 rad), `max_scan_age` (0.5 s), `max_block` (10 s), `cloud_frame`
+waypoint before scanning, only without flow), `yaw_tol` (0.15 rad, only without flow), `max_scan_age` (0.5 s), `max_block` (10 s), `cloud_frame`
 (`flu` / `optical`), `cloud_stride` (1), `use_depth` (true), `zmax_local` (2.6 m: highest climb).
 
 ## Known limits
 
-- **Stop-and-go.** The policy decides at every waypoint, from a scan taken there, after the drone has settled and
-  turned; vT's time model assumes continuous flight with a time per degree of turn. The report separates the
-  waiting time (`wait_s`), so the model's error can be told apart from the decision overhead.
+- **Flying through the waypoints (`flow`, default on).** The first Gazebo + PX4 flight stopped at every waypoint: 22/22
+  legs, 0 collisions, 0 fallbacks, but 2.93 × the time model. 80 % of the time the drone crawled at 0.15–0.6 m/s (mean
+  0.33 m/s): with position-only setpoints PX4's position loop (`MPC_XY_P` ≈ 0.95 /s) trails a 1 m/s carrot by ~1 m and
+  then approaches each short (0.4–1.5 m) segment's end at a speed proportional to the remaining distance. With `flow`
+  the carrot's velocity is sent as feed-forward and the next decision is taken once the drone is within `lookahead`
+  (0.6 m) of the waypoint, on the scan re-expressed at the waypoint (`scan3d.reframe`), so the drone never stops. In the
+  offline test with a PX4-like drone: 2.21 × the time model stopping, 0.96 × flowing. `flow:=false` restores the
+  first behaviour; the report's `wait_s` is the time spent hovering at waypoints.
 - **Unobservable zones.** See above: parts of obstacles outside the sensors' view are not known in flight.
 - **One policy per drone, no coordination.** The drones keep `main`'s zoning, transit layer and yield rule; vT does
   not see the other drones (multi-drone RL is the next step).
