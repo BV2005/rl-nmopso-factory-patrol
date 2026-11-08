@@ -6,8 +6,10 @@ sensor data and its setpoints, with synthetic sensors (rlpatrol/synth_sensors.py
   3. VTPilot on the 73 factory2 real legs (perfect tracking): success, no collision, env time == judge time
   4. tracking error (0.1 m per waypoint): still no collision
   5. unexpected boxes across legs (sensed, never in any map): avoided
-  6. gazebo/nmopso_demo/vt_follower.py itself under a fake ROS 2 / PX4 layer with a kinematic drone: drone 1 of the
-     pad-safe plan flies take-off, transit, one patrol lap planned online, transit back, landing; legs logged
+  6. gazebo/nmopso_demo/vt_follower.py itself under a fake ROS 2 / PX4 layer with a PX4-like drone (position P-loop
+     0.95 /s + velocity feed-forward, 3 m/s^2, yaw 45 deg/s): drone 1 of the pad-safe plan flies take-off, transit, one
+     patrol lap planned online, transit back, landing - stopping at every waypoint (as first flown in Gazebo: ~3x the
+     time model) and flowing through them (flow: feed-forward + decisions a waypoint ahead)
   python scripts/test_vt_flight.py [--ckpt results/ckpt/vT3_seed1_best.pt] [--quick]"""
 import argparse
 import importlib
@@ -264,15 +266,16 @@ def _fake_ros(params):
     return Msg, VehicleStatus
 
 
-def follower_checks(ckpt, drone=1, max_sim_s=900.0):
-    print(f"[6] vt_follower.py under a fake ROS 2 / PX4 layer: drone {drone} of the pad-safe plan, one lap")
+def follower_checks(ckpt, drone=1, max_sim_s=1500.0, flow=True):
+    mode = "flowing through the waypoints" if flow else "stopping at every waypoint"
+    print(f"[6] vt_follower.py under a fake ROS 2 / PX4 layer: drone {drone} of the pad-safe plan, one lap, {mode}")
     hall, rects, W, sensed = factory2()
     plan = json.loads(PLAN.read_text())
     me = next(d for d in plan["drones"] if d["id"] == drone)
     with tempfile.TemporaryDirectory() as tmp:
         log = Path(tmp) / f"trace_drone{drone}.csv"
         Msg, VS = _fake_ros(dict(drone_id=drone, paths_file=str(PLAN), log_file=str(log), laps=1, speed=1.0, ckpt=str(ckpt),
-                                 max_scan_age=1.0, yield_radius=0.0))
+                                 max_scan_age=1.0, yield_radius=0.0, flow=flow))
         sys.path.insert(0, str(ROOT / "gazebo" / "nmopso_demo"))
         for m in ("patrol_follower", "vt_follower"):
             sys.modules.pop(m, None)
@@ -284,6 +287,7 @@ def follower_checks(ckpt, drone=1, max_sim_s=900.0):
         node = vf.VTFollower()
         home = me["home"]
         p = np.array([home[0], home[1], 0.0])                            # the drone, world ENU
+        vel = np.zeros(3)
         yaw = 0.0                                                        # ENU
         armed = offboard = landing = False
         states, dt = [], 0.05
@@ -299,7 +303,7 @@ def follower_checks(ckpt, drone=1, max_sim_s=900.0):
                                                              nav_state=VS.NAVIGATION_STATE_OFFBOARD if offboard else 0))
             node.subs[f"{ns}/fmu/out/vehicle_attitude"](Msg(q=[1.0, 0.0, 0.0, 0.0]))
             # sensors: when the drone is about to decide (near the end of the online track, slow), every 0.5 s
-            if node.phase == "PATROL" and _Clock.t - last_sense > 0.5 and math.dist(p, node.wp[-1]) < 0.4:
+            if node.phase == "PATROL" and _Clock.t - last_sense > 0.3 and math.dist(p, node.wp[-1]) < 0.9:
                 rs, a0, inc = lidar_scan(sensed, p, yaw)
                 node.subs[f"{ns}/scan"](Msg(ranges=rs.tolist(), angle_min=a0, angle_increment=inc, range_min=0.1, range_max=30.0))
                 node.subs[f"{ns}/depth/points"](Msg(pts=depth_cloud(sensed, p, yaw)))
@@ -324,12 +328,25 @@ def follower_checks(ckpt, drone=1, max_sim_s=900.0):
                 tgt = np.array([home[0] + m.position[1], home[1] + m.position[0], -m.position[2]])
                 if landing:
                     tgt[2] = 0.0
-                v = tgt - p                                              # fly at the setpoint: <= 1.5 m/s
-                h = float(np.linalg.norm(v[:2]))                         # horizontally, <= 0.6 m/s vertically,
-                p[:2] += v[:2] * min(1.0, 1.5 * dt / max(h, 1e-9))       # yaw rate <= 1.5 rad/s
-                p[2] += float(np.clip(v[2], -0.6 * dt, 0.6 * dt))
+                # PX4-like multicopter position control: velocity setpoint = feed-forward + P * position error
+                # (MPC_XY_P 0.95, MPC_Z_P 1.0), limited to 5 m/s horizontally / 1 m/s vertically, acceleration
+                # 3 m/s^2 (MPC_ACC_HOR), yaw rate 45 deg/s (MPC_YAWRAUTO_MAX)
+                ffv = getattr(m, "velocity", None)
+                ff = np.array([ffv[1], ffv[0], -ffv[2]]) if ffv is not None and not landing else np.zeros(3)
+                e = tgt - p
+                vsp = ff + np.array([0.95 * e[0], 0.95 * e[1], 1.0 * e[2]])
+                hn = float(np.linalg.norm(vsp[:2]))
+                if hn > 5.0:
+                    vsp[:2] *= 5.0 / hn
+                vsp[2] = float(np.clip(vsp[2], -1.0, 1.0))
+                dv = vsp - vel
+                dn = float(np.linalg.norm(dv))
+                if dn > 3.0 * dt:
+                    dv *= 3.0 * dt / dn
+                vel = vel + dv
+                p = p + vel * dt
                 ey = (math.pi / 2 - m.yaw) - yaw                         # setpoint NED yaw -> ENU
-                yaw += float(np.clip(math.atan2(math.sin(ey), math.cos(ey)), -1.5 * dt, 1.5 * dt))
+                yaw += float(np.clip(math.atan2(math.sin(ey), math.cos(ey)), -math.radians(45) * dt, math.radians(45) * dt))
                 sp[:] = sp[-1:]
             states.append((_Clock.t, *p, node.phase))
             _Clock.t += dt
@@ -346,12 +363,12 @@ def follower_checks(ckpt, drone=1, max_sim_s=900.0):
     check(done and len(rows) == len(node.legs) and all(o == "success" for o in outcomes),
           f"take-off, transit, {len(rows)} patrol legs planned online (all '{outcomes[0] if outcomes else '-'}'), transit back and "
           f"landing in {_Clock.t:.0f} s simulated; {len(dec_rows)} decisions logged")
-    check(not phys, "the flown patrol (fake drone, 1.5 m/s cap, yaw rate 1.5 rad/s) never comes within 0.3 m of an obstacle")
+    check(not phys, "the flown patrol (PX4-like drone) never comes within 0.3 m of an obstacle")
     check(rep.returncode == 0 and "success 100.0 %" in rep.stdout,
           "scripts/vt_flight_report.py summarises the run's logs" + ("" if rep.returncode == 0 else f": {rep.stderr[-400:]}"))
     print("\n".join("      " + l for l in rep.stdout.splitlines()[:2]))
-    check(model > 0 and flown > 0, f"time model {model:.1f} s vs flown {flown:.1f} s over the successful legs "
-          f"(ratio {flown / model:.2f}: stop-and-go at every waypoint and the drone's lag; Gazebo measures the real one)")
+    print(f"      time model {model:.1f} s vs flown {flown:.1f} s over the successful legs: ratio {flown / model:.2f}")
+    return flown / model if model > 0 else math.inf
 
 
 def main():
@@ -364,7 +381,11 @@ def main():
     parity_checks(40 if q else 150)
     helper_checks()
     pilot_checks(a.ckpt, 15 if q else 73, 8 if q else 25, 3 if q else 8)
-    follower_checks(a.ckpt)
+    stop = follower_checks(a.ckpt, flow=False)
+    flow = follower_checks(a.ckpt, flow=True)
+    check(stop > 2.0 and flow < 1.6 and flow < 0.6 * stop,
+          f"flowing through the waypoints flies the patrol at {flow:.2f} x the time model, stopping at each {stop:.2f} x "
+          f"(Gazebo + PX4 measured 2.93 x stopping)")
     print(f"all {len(OK)} checks passed")
 
 

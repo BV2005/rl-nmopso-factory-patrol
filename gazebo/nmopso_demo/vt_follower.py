@@ -45,7 +45,7 @@ import torch  # noqa: E402
 
 from patrol_follower import PatrolFollower  # noqa: E402
 from rlpatrol import sensors as S  # noqa: E402
-from rlpatrol.scan3d import flight_scan  # noqa: E402
+from rlpatrol.scan3d import flight_scan, reframe  # noqa: E402
 from rlpatrol.vt_pilot import MODES, VTPilot  # noqa: E402
 
 
@@ -59,6 +59,7 @@ class VTFollower(PatrolFollower):
         for name, default in (('ckpt', ''), ('pref', ''), ('scan_topic', ''), ('cloud_topic', ''), ('cloud_frame', 'flu'),
                               ('cloud_stride', 1), ('radius', 0.1), ('samples', 16), ('zmax_local', 2.6),
                               ('arrive_dist', 0.25), ('settle', 0.3), ('yaw_tol', 0.15), ('max_scan_age', 0.5),
+                              ('flow', True), ('lookahead', 0.6),
                               ('max_block', 10.0), ('use_depth', True)):
             self.declare_parameter(name, default)
         P = lambda k: self.get_parameter(k).value                          # noqa: E731
@@ -70,6 +71,11 @@ class VTFollower(PatrolFollower):
         self.pilot = VTPilot(P('ckpt'), hall, pref=pref, zmax_local=float(P('zmax_local')), radius=float(P('radius')),
                              samples=int(P('samples')), seed=self.id)
         self.arrive, self.settle, self.yaw_tol = float(P('arrive_dist')), float(P('settle')), float(P('yaw_tol'))
+        # flow: fly through the waypoints - the carrot's velocity goes to PX4 as feed-forward, and the next decision is
+        # taken once the drone is within `lookahead` of the waypoint, on the scan re-expressed at the waypoint
+        # (scan3d.reframe). Off: stop at every waypoint (arrive_dist, settle, face the heading), as first flown.
+        self.flow, self.lookahead = bool(P('flow')), float(P('lookahead'))
+        self.velocity_ff = self.velocity_ff or self.flow
         self.max_age, self.max_block = float(P('max_scan_age')), float(P('max_block'))
         self.cloud_frame, self.use_depth, self.stride = P('cloud_frame'), bool(P('use_depth')), max(1, int(P('cloud_stride')))
 
@@ -143,7 +149,12 @@ class VTFollower(PatrolFollower):
             if self.cloud is None or now - self.t_depth > self.max_age:
                 return None
             depth = S.level(self.cloud, *self.roll_pitch())
-        return flight_scan(self.lidar_xy, depth, drone_z=pos[2], margin=self.pilot.margin, yaw=self.yaw_enu(), beams=True)
+        lid, yaw, z = self.lidar_xy, self.yaw_enu(), pos[2]
+        if self.flow:                                                      # as seen from the waypoint, facing its heading
+            at = (*self.pilot.cur, self.pilot.heading)
+            lid, depth = reframe(lid, depth, (*pos, yaw), at)
+            yaw, z = at[3], at[2]
+        return flight_scan(lid, depth, drone_z=z, margin=self.pilot.margin, yaw=yaw, beams=True)
 
     # --- the online PATROL track --------------------------------------------------------------------------------
     def reset_loop(self):
@@ -214,7 +225,8 @@ class VTFollower(PatrolFollower):
         if self.loop_done:
             return False
         self.s = min(self.s, self.loop_len)
-        if math.dist(pos, self.wp[-1]) > self.arrive:                     # still flying to the current end
+        near = self.lookahead if self.flow else self.arrive
+        if math.dist(pos, self.wp[-1]) > near:                             # still flying to the current end
             self.arrived = None
             return True
         if self.arrived is None:
@@ -234,8 +246,8 @@ class VTFollower(PatrolFollower):
             if self.pilot.success:                                         # arrived at the goal
                 self.finish_leg('success')
                 return True
-        settled = now - self.arrived >= self.settle
-        facing = abs(wrap(self.yaw_enu() - self.pilot.heading)) <= self.yaw_tol or now - self.arrived > 3.0
+        settled = self.flow or now - self.arrived >= self.settle
+        facing = self.flow or abs(wrap(self.yaw_enu() - self.pilot.heading)) <= self.yaw_tol or now - self.arrived > 3.0
         if not (settled and facing):
             return True                                                    # settling / still turning to the heading
         scan = self.scan(now, pos)
