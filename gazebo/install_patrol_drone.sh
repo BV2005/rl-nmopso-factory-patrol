@@ -28,6 +28,14 @@ if [ "${NO_PIP:-0}" != 1 ] && ! python3 -c "import torch, scipy" > /dev/null 2>&
     --extra-index-url https://download.pytorch.org/whl/cpu
 fi
 
+# check that the model parses: the standalone `gz sdf` resolves the included models (x500, lidar_2d_v2) through
+# SDF_PATH, not GZ_SIM_RESOURCE_PATH as Gazebo does; a failure here is a warning (Gazebo's own spawn in run_demo.sh,
+# which checks the sensor topics, is the real test)
 export GZ_SIM_RESOURCE_PATH="$MODELS${GZ_SIM_RESOURCE_PATH:+:$GZ_SIM_RESOURCE_PATH}"
-gz sdf -k "$HERE/models/x500_patrol/model.sdf"
+if SDF_PATH="$MODELS${SDF_PATH:+:$SDF_PATH}" gz sdf -k "$HERE/models/x500_patrol/model.sdf" > /tmp/x500_patrol_sdf_check.log 2>&1; then
+  echo "x500_patrol model.sdf: valid"
+else
+  echo "WARNING: 'gz sdf -k' could not fully check x500_patrol (see /tmp/x500_patrol_sdf_check.log); continue with"
+  echo "         MODEL=x500_patrol bash gazebo/fly_plan.sh <plan> - it fails early if Gazebo cannot spawn the drone"
+fi
 echo "done: fly it with  MODEL=x500_patrol bash gazebo/fly_plan.sh <plan>"
