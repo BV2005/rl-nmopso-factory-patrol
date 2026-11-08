@@ -4,7 +4,8 @@
 # Micro XRCE-DDS Agent, a colcon workspace with px4_msgs at the tested commit, pymavlink.
 # Needs sudo and about 15 GB of disk; PX4's build takes 10-30 min.
 #   bash gazebo/setup_sim.sh
-# Environment overrides: PX4_DIR (default ~/PX4-Autopilot), PX4_ROS_WS (default ~/px4_ros_ws).
+# Environment overrides: PX4_DIR (default ~/PX4-Autopilot), PX4_ROS_WS (default ~/px4_ros_ws), NO_PIP=1 (skip the
+# Python packages of the flight code - install them into a venv yourself, see docs/gazebo_vt.md).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # before the cd's below
 PX4_COMMIT=cda3c3603f          # v1.18.0-beta1-334 (tested)
@@ -51,7 +52,10 @@ fi
 set +u; source /opt/ros/jazzy/setup.bash; set -u
 (cd "$WS" && colcon build --packages-select px4_msgs)
 
-python3 -m pip install --user --break-system-packages pymavlink==2.4.49 numpy
+# Python packages: into the active venv if there is one (python3 -m venv --system-site-packages, so that the ROS 2
+# packages stay visible), else into the user site of the system python3
+if [ -n "${VIRTUAL_ENV:-}" ]; then PIP=(python3 -m pip install); else PIP=(python3 -m pip install --user --break-system-packages); fi
+[ "${NO_PIP:-0}" = 1 ] || "${PIP[@]}" pymavlink==2.4.49 numpy
 
 # the x500_patrol sensor drone (gazebo/models/x500_patrol) and what sensor_follower.py needs
 PX4_DIR="$PX4_DIR" bash "$HERE/install_patrol_drone.sh"
