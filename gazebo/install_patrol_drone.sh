@@ -22,8 +22,9 @@ if ! dpkg -s ros-jazzy-ros-gz-bridge > /dev/null 2>&1 || ! dpkg -s ros-jazzy-sen
   sudo apt-get update && sudo apt-get install -y ros-jazzy-ros-gz-bridge ros-jazzy-sensor-msgs-py
 fi
 
-if ! python3 -c "import torch, scipy" > /dev/null 2>&1; then
-  python3 -m pip install --user --break-system-packages -r "$REPO/requirements.txt" \
+if [ "${NO_PIP:-0}" != 1 ] && ! python3 -c "import torch, scipy" > /dev/null 2>&1; then
+  if [ -n "${VIRTUAL_ENV:-}" ]; then PIP=(python3 -m pip install); else PIP=(python3 -m pip install --user --break-system-packages); fi
+  "${PIP[@]}" -r "$REPO/requirements.txt" \
     --extra-index-url https://download.pytorch.org/whl/cpu
 fi
 
