@@ -55,10 +55,10 @@ pad-safe plan flies take-off, transit, one lap of 22 PATROL legs planned online,
 # RunPod: an Ubuntu 24.04 image; containers need NVIDIA_DRIVER_CAPABILITIES=all (graphics, not just compute)
 apt-get update && apt-get install -y sudo git python3-pip         # root containers often lack sudo
 cd /workspace && git clone -b time-optimal-rl https://github.com/BV2005/rl-nmopso-factory-patrol && cd rl-nmopso-factory-patrol
-bash gazebo/setup_sim.sh                     # ROS 2 Jazzy, Gazebo Harmonic, PX4 (tested commit), XRCE agent, px4_msgs, x500_patrol
-# the followers run with the system python3 (ROS): it needs torch + numpy (a CPU wheel is enough)
-pip3 install --break-system-packages torch --index-url https://download.pytorch.org/whl/cpu
-pip3 install --break-system-packages numpy
+NO_PIP=1 bash gazebo/setup_sim.sh            # ROS 2 Jazzy, Gazebo Harmonic, PX4 (tested commit), XRCE agent, px4_msgs, x500_patrol
+# the flight code's Python packages in a venv (system site packages visible: the ROS 2 Python packages need them)
+python3 -m venv --system-site-packages .venv && . .venv/bin/activate && export PYTHONNOUSERSITE=1
+pip install -r requirements.txt pymavlink==2.4.49 --extra-index-url https://download.pytorch.org/whl/cpu
 python3 -c "import sys; sys.path.insert(0, '.'); import rlpatrol.vt_pilot; print('vT pilot imports OK')"
 python3 scripts/test_vt_flight.py --quick    # the offline test on the pod too
 ls /usr/share/glvnd/egl_vendor.d/            # 10_nvidia.json: headless GPU rendering of the sensors
