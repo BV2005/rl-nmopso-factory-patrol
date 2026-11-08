@@ -53,6 +53,7 @@ class PatrolFollower(Node):
         self.declare_parameter('clear_radius', 2.0)       # vertical-clearance rule, see column_blocked()
         self.declare_parameter('max_hold', 30.0)
         self.declare_parameter('yield_radius', 2.5)       # benchmark rule: yield to a lower-ID peer this close
+        self.declare_parameter('velocity_ff', False)      # send the carrot's velocity with its position (feed-forward)
         self.id = self.get_parameter('drone_id').value
         self.yield_radius = float(self.get_parameter('yield_radius').value)
         self.clear_radius = float(self.get_parameter('clear_radius').value)
@@ -60,6 +61,7 @@ class PatrolFollower(Node):
         self.speed = float(self.get_parameter('speed').value)
         self.max_lead = float(self.get_parameter('max_lead').value)
         self.laps = int(self.get_parameter('laps').value)
+        self.velocity_ff = bool(self.get_parameter('velocity_ff').value)
 
         with open(self.get_parameter('paths_file').value) as f:
             data = json.load(f)
@@ -148,10 +150,14 @@ class PatrolFollower(Node):
         """current position in world ENU (NED local frame starts at home)"""
         return (self.home[0] + self.lpos.y, self.home[1] + self.lpos.x, -self.lpos.z)
 
-    def publish_sp(self, x, y, z, yaw):
+    def publish_sp(self, x, y, z, yaw, vel=None):
+        """position setpoint (world ENU) and NED yaw; vel (world ENU m/s) is sent as velocity feed-forward: PX4 then
+        tracks a moving setpoint without the lag of its position P-loop (about speed / MPC_XY_P behind)."""
         m = TrajectorySetpoint()
         m.timestamp = self.now_us()
         m.position = [float(y - self.home[1]), float(x - self.home[0]), float(-z)]
+        if vel is not None:
+            m.velocity = [float(vel[1]), float(vel[0]), float(-vel[2])]
         m.yaw = float(yaw)
         self.sp_pub.publish(m)
         self.sp = (x, y, z)
@@ -174,6 +180,15 @@ class PatrolFollower(Node):
         p = tuple(a[k] + t * (b[k] - a[k]) for k in range(3))
         yaw = math.atan2(b[0] - a[0], b[1] - a[1]) if seg > 1e-9 else 0.0
         return p, yaw
+
+    def carrot_velocity(self, moving):
+        """world ENU velocity of the carrot: speed along the current segment while it advances, else zero."""
+        if not moving or self.s >= self.loop_len - 1e-9:
+            return (0.0, 0.0, 0.0)
+        i = next((k for k in range(len(self.cum) - 1) if self.cum[k + 1] > self.s), len(self.cum) - 2)
+        a, b = self.wp[i], self.wp[i + 1]
+        n = math.dist(a, b)
+        return (0.0, 0.0, 0.0) if n < 1e-9 else tuple(self.speed * (b[k] - a[k]) / n for k in range(3))
 
     def column_blocked(self, pos, z_to):
         """Vertical-clearance rule for a climb or descent from pos to altitude z_to: the ids of airborne
@@ -303,7 +318,8 @@ class PatrolFollower(Node):
                         self.get_logger().info(f'task {stop[1]} completed ({now - self.t0:.1f} s since start)')
                         self.stop_i += 1
                         self.hover_since = None
-            if math.dist(pos, carrot) < self.max_lead and not wait:
+            moving = math.dist(pos, carrot) < self.max_lead and not wait
+            if moving:
                 self.s += self.speed * 0.05
             # the next phase starts only once the drone has reached the end of the track (not just
             # the carrot, which leads by up to max_lead) and every task stop on it is done
@@ -331,7 +347,7 @@ class PatrolFollower(Node):
                             self.set_phase('LAND')
                             return
             p, yaw = self.point_at(self.s)
-            self.publish_sp(*p, yaw)
+            self.publish_sp(*p, yaw, self.carrot_velocity(moving) if self.velocity_ff else None)
         elif self.phase == 'LAND':
             # hover over home, then auto-land; once on the ground for 3 s, disarm and finish
             # (PX4's own disarm-after-landing is not relied on: it was not observed in the demo)

@@ -130,10 +130,12 @@ class VTPilot:
         zlow = min(p[2], float(q[2]))
         if L > 1e-6 and beams is not None:
             x, y, top = (np.asarray(beams[k], float) for k in ("x", "y", "top"))
+            seen = np.isfinite(x)                                         # beams with a zone return
+            x, y = np.where(seen, x, 0.0), np.where(seen, y, 0.0)
             phi = math.atan2(v[1], v[0]) - self.heading                   # the step in the drone frame
             along = x * math.cos(phi) + y * math.sin(phi)
             lat = np.abs(-x * math.sin(phi) + y * math.cos(phi))
-            use = np.isfinite(x) & ~(top + DRONE_M <= zlow) & (along > 0)
+            use = seen & ~(top + DRONE_M <= zlow) & (along > 0)
             if bool((use & (lat < self.radius) & (along < L + self.radius)).any()):
                 return False
         elif L > 1e-6:
