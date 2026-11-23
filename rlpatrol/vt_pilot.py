@@ -118,20 +118,27 @@ class VTPilot:
                     executed=P[0, :int(n[0])].numpy().tolist())
 
     # --- decisions ---------------------------------------------------------------------------------------
-    def clear(self, q, ranges, heights, beams=None):
-        """True if the step from the current waypoint to q [3] is clear in the scan (and of the walls). With the
+    def clear(self, q, ranges, heights, beams=None, start=None):
+        """True if the step from the current waypoint (or from `start` [3], world: the drone short of the waypoint when
+        it decides ahead - the corner it cuts) to q [3] is clear in the scan (and of the walls). With the
         full-resolution scan (beams, scan3d.flight_scan(beams=True)): no zone return within `radius` of the segment
         before its end, on any 0.25 deg beam; else the 10 deg bins (sensors.segment_clear: a return anywhere in its
         sector, so steps that skirt a zone at a shallow angle are refused). Returns of an obstacle whose top is known
         and at least DRONE_M below the segment are flown over (the 3-D rule of training)."""
-        p = self.cur
+        cur = self.cur
+        p = cur if start is None else np.asarray(start, float)
         v = np.asarray(q[:2], float) - p[:2]
         L = float(np.hypot(*v))
         zlow = min(p[2], float(q[2]))
+        if start is not None and beams is None:
+            raise ValueError("a step from `start` needs the full-resolution beams")
         if L > 1e-6 and beams is not None:
             x, y, top = (np.asarray(beams[k], float) for k in ("x", "y", "top"))
             seen = np.isfinite(x)                                         # beams with a zone return
             x, y = np.where(seen, x, 0.0), np.where(seen, y, 0.0)
+            ch, sh = math.cos(self.heading), math.sin(self.heading)       # `start` in the scan's frame (the waypoint's)
+            d = p[:2] - cur[:2]
+            x, y = x - (ch * d[0] + sh * d[1]), y - (-sh * d[0] + ch * d[1])
             phi = math.atan2(v[1], v[0]) - self.heading                   # the step in the drone frame
             along = x * math.cos(phi) + y * math.sin(phi)
             lat = np.abs(-x * math.sin(phi) + y * math.cos(phi))
@@ -147,7 +154,8 @@ class VTPilot:
                 return False
         e = self.env
         qt = torch.as_tensor(np.asarray(q, float), dtype=e.dt)[None]
-        return not bool(segment_check_box(e.cur, qt, e.b["boxes"], e.coll, e.margin)[0][0])
+        pt = e.cur if start is None else torch.as_tensor(p, dtype=e.dt)[None]
+        return not bool(segment_check_box(pt, qt, e.b["boxes"], e.coll, e.margin)[0][0])
 
     def _candidates(self, o, L):
         with torch.no_grad():

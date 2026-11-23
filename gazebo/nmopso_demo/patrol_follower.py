@@ -24,6 +24,7 @@ Vertical-clearance rule (transit layer): before a climb or descent (a vertical s
 the landing), the drone holds until no other airborne drone is within clear_radius horizontally in
 the column it will pass through (column_blocked()), at most max_hold seconds.
 """
+import bisect
 import csv
 import json
 import math
@@ -54,6 +55,7 @@ class PatrolFollower(Node):
         self.declare_parameter('max_hold', 30.0)
         self.declare_parameter('yield_radius', 2.5)       # benchmark rule: yield to a lower-ID peer this close
         self.declare_parameter('velocity_ff', False)      # send the carrot's velocity with its position (feed-forward)
+        self.declare_parameter('brake_acc', 1.5)          # with feed-forward: the carrot brakes to a stop at an open track end
         self.id = self.get_parameter('drone_id').value
         self.yield_radius = float(self.get_parameter('yield_radius').value)
         self.clear_radius = float(self.get_parameter('clear_radius').value)
@@ -62,6 +64,7 @@ class PatrolFollower(Node):
         self.max_lead = float(self.get_parameter('max_lead').value)
         self.laps = int(self.get_parameter('laps').value)
         self.velocity_ff = bool(self.get_parameter('velocity_ff').value)
+        self.brake_acc = float(self.get_parameter('brake_acc').value)
 
         with open(self.get_parameter('paths_file').value) as f:
             data = json.load(f)
@@ -170,10 +173,15 @@ class PatrolFollower(Node):
         return self.point_on((self.wp, self.cum, self.loop_len), s)
 
     @staticmethod
+    def seg_index(cum, s):
+        """the segment i (wp[i] -> wp[i + 1]) holding arc length s: the first with cum[i + 1] >= s (O(log n))"""
+        return max(0, min(len(cum) - 2, bisect.bisect_left(cum, s, 1) - 1))
+
+    @staticmethod
     def point_on(track, s):
         wp, cum, length = track
         s = max(0.0, min(s, length))
-        i = max(0, min(len(cum) - 2, next((k for k in range(len(cum) - 1) if cum[k + 1] >= s), len(cum) - 2)))
+        i = PatrolFollower.seg_index(cum, s)
         a, b = wp[i], wp[i + 1]
         seg = cum[i + 1] - cum[i]
         t = 0.0 if seg < 1e-9 else (s - cum[i]) / seg
@@ -181,14 +189,31 @@ class PatrolFollower(Node):
         yaw = math.atan2(b[0] - a[0], b[1] - a[1]) if seg > 1e-9 else 0.0
         return p, yaw
 
-    def carrot_velocity(self, moving):
-        """world ENU velocity of the carrot: speed along the current segment while it advances, else zero."""
-        if not moving or self.s >= self.loop_len - 1e-9:
+    def ff_active(self):
+        """send the carrot's velocity as feed-forward this tick (vt_follower: also on its PATROL legs with flow)"""
+        return self.velocity_ff
+
+    def carrot_speed(self):
+        """the carrot's speed: `speed`, and with feed-forward braking at brake_acc to a stop at the track's end, so the
+        velocity setpoint never drops from `speed` to 0 in one tick at an end that is not yet extended (vt_follower:
+        the next decision not taken yet) - PX4 would overshoot it"""
+        if not self.ff_active():
+            return self.speed
+        return min(self.speed, max(0.1, math.sqrt(2 * self.brake_acc * max(0.0, self.loop_len - self.s))))
+
+    def extend_ahead(self):
+        """how far (m of arc) before the track's end extend_track() is already called (vt_follower with flow: early
+        enough that the next segment is appended before the carrot starts braking)"""
+        return 0.0
+
+    def carrot_velocity(self, moving, v):
+        """world ENU velocity of the carrot: v along the segment point_at(s) is on while it advances, else zero."""
+        if not moving or v <= 0 or self.s >= self.loop_len - 1e-9:
             return (0.0, 0.0, 0.0)
-        i = next((k for k in range(len(self.cum) - 1) if self.cum[k + 1] > self.s), len(self.cum) - 2)
+        i = self.seg_index(self.cum, self.s)
         a, b = self.wp[i], self.wp[i + 1]
         n = math.dist(a, b)
-        return (0.0, 0.0, 0.0) if n < 1e-9 else tuple(self.speed * (b[k] - a[k]) / n for k in range(3))
+        return (0.0, 0.0, 0.0) if n < 1e-9 else tuple(v * (b[k] - a[k]) / n for k in range(3))
 
     def column_blocked(self, pos, z_to):
         """Vertical-clearance rule for a climb or descent from pos to altitude z_to: the ids of airborne
@@ -319,13 +344,14 @@ class PatrolFollower(Node):
                         self.stop_i += 1
                         self.hover_since = None
             moving = math.dist(pos, carrot) < self.max_lead and not wait
+            v = self.carrot_speed()
             if moving:
-                self.s += self.speed * 0.05
+                self.s = min(self.loop_len, self.s + v * 0.05) if self.ff_active() else self.s + v * 0.05
             # the next phase starts only once the drone has reached the end of the track (not just
             # the carrot, which leads by up to max_lead) and every task stop on it is done
             pending = self.phase == 'PATROL' and self.stop_i < len(self.stops)
             # a track planned while it is flown (sensor_follower.py) is not finished at its current end
-            if self.s >= self.loop_len and self.extend_track(now, pos):
+            if self.s >= self.loop_len - self.extend_ahead() and self.extend_track(now, pos):
                 pending = True
             if self.s >= self.loop_len and math.dist(pos, self.wp[-1]) < 0.3 and not pending:
                 if self.phase == 'TRANSIT_IN':
@@ -347,7 +373,7 @@ class PatrolFollower(Node):
                             self.set_phase('LAND')
                             return
             p, yaw = self.point_at(self.s)
-            self.publish_sp(*p, yaw, self.carrot_velocity(moving) if self.velocity_ff else None)
+            self.publish_sp(*p, yaw, self.carrot_velocity(moving, v) if self.ff_active() else None)
         elif self.phase == 'LAND':
             # hover over home, then auto-land; once on the ground for 3 s, disarm and finish
             # (PX4's own disarm-after-landing is not relied on: it was not observed in the demo)

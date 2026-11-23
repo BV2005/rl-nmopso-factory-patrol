@@ -7,15 +7,27 @@ patrol points of the plan is flown one vT waypoint at a time, planned from what 
 (rlpatrol/vt_pilot.py):
 
   at the leg start  the drone turns in place to face the leg's goal (vT's first heading)
-  at a waypoint     once it is within arrive_dist and has settled for `settle` s, facing the last segment's
-                    direction (the heading the policy assumes): the lidar returns (/droneN/scan) and the levelled
-                    depth points (/droneN/depth/points) give the flight scan (scan3d.flight_scan: ranges to the
-                    zone box_margin around every return, obstacle-height channel), the policy (deterministic) picks
-                    the next waypoint; VTPilot.decide() checks it against the scan and falls back to the policy's
-                    samples, an action sweep, then a backtrack. If nothing is clear the drone hovers and rescans;
-                    after max_block s it flies straight to the leg's goal if the scan shows that clear, else the
-                    leg is skipped (logged)
+  a decision        the lidar returns (/droneN/scan) and the levelled depth points (/droneN/depth/points) give the
+                    flight scan (scan3d.flight_scan: ranges to the zone box_margin around every return, obstacle-
+                    height channel), the policy (deterministic) picks the next waypoint; VTPilot.decide() checks it
+                    against the scan and falls back to the policy's samples, an action sweep, then a backtrack. If
+                    nothing is clear the drone hovers and rescans; after max_block s it flies straight to the leg's
+                    goal if the scan shows that clear, else the leg is skipped (logged)
   the last step     the final approach to the goal (or, out of decisions, a straight segment to it if clear)
+
+When a decision is taken (flow, the default: fly through the waypoints):
+  - once the drone is within `lookahead` of the current waypoint, early enough that the next segment is appended
+    before the carrot brakes; on the PATROL legs the carrot's velocity goes to PX4 as feed-forward
+  - on a scan re-expressed at the waypoint (scan3d.reframe) from the pose each sensor message was taken at (the
+    drone's pose `sensor_latency` s before the message arrived, not its pose at the decision)
+  - only from sensor data taken facing the heading the policy assumes (within yaw_tol: the depth camera's 73 deg
+    view is the only sensor for obstacles below the lidar plane) and level (tilt <= max_tilt: the 2-D lidar sweeps
+    the floor / ceiling at 5 m from 6 deg on); until then the carrot stops at the waypoint and the drone turns to
+    the heading there, as without flow
+  - the step must also be clear from where the drone is (the corner it cuts flying through the waypoint, checked up
+    to `lookahead` along the new segment); if not, the drone stops at the waypoint and decides there
+flow:=false: stop at every waypoint (within arrive_dist, settled for `settle` s, facing the heading; tilt <= max_tilt),
+as first flown in Gazebo (2.9 x the time model).
 
 The carrot of patrol_follower.py flies every segment at `speed` m/s (1.0 = vT's V_CRUISE) facing the segment.
 Logs, next to <log_file>:
@@ -26,6 +38,7 @@ Logs, next to <log_file>:
   <log>_track.json   the PATROL track as flown (for check_patrol.py)
 Summarise a run with scripts/vt_flight_report.py. Needs PyTorch and the repository on PYTHONPATH
 (run_demo.sh VT_CKPT=... sets it up)."""
+import collections
 import csv
 import json
 import math
@@ -59,7 +72,7 @@ class VTFollower(PatrolFollower):
         for name, default in (('ckpt', ''), ('pref', ''), ('scan_topic', ''), ('cloud_topic', ''), ('cloud_frame', 'flu'),
                               ('cloud_stride', 1), ('radius', 0.1), ('samples', 16), ('zmax_local', 2.6),
                               ('arrive_dist', 0.25), ('settle', 0.3), ('yaw_tol', 0.15), ('max_scan_age', 0.5),
-                              ('flow', True), ('lookahead', 0.6),
+                              ('flow', True), ('lookahead', 0.6), ('max_tilt', 0.1), ('sensor_latency', 0.05),
                               ('max_block', 10.0), ('use_depth', True)):
             self.declare_parameter(name, default)
         P = lambda k: self.get_parameter(k).value                          # noqa: E731
@@ -75,7 +88,9 @@ class VTFollower(PatrolFollower):
         # taken once the drone is within `lookahead` of the waypoint, on the scan re-expressed at the waypoint
         # (scan3d.reframe). Off: stop at every waypoint (arrive_dist, settle, face the heading), as first flown.
         self.flow, self.lookahead = bool(P('flow')), float(P('lookahead'))
-        self.velocity_ff = self.velocity_ff or self.flow
+        self.max_tilt, self.latency = float(P('max_tilt')), float(P('sensor_latency'))
+        self.stop_here = False                                             # the corner is not clear: decide at the waypoint
+        self.poses = collections.deque(maxlen=60)                          # (t, x, y, z, yaw, roll, pitch) at 20 Hz: 3 s
         self.max_age, self.max_block = float(P('max_scan_age')), float(P('max_block'))
         self.cloud_frame, self.use_depth, self.stride = P('cloud_frame'), bool(P('use_depth')), max(1, int(P('cloud_stride')))
 
@@ -91,7 +106,7 @@ class VTFollower(PatrolFollower):
         qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE,
                          history=HistoryPolicy.KEEP_LAST, depth=1)
         ns = f'/drone{self.id}'
-        self.lidar_xy = self.cloud = None
+        self.lidar_xy = self.cloud = self.lidar_pose = self.depth_pose = None
         self.t_lidar = self.t_depth = -1.0
         self.att = None
         self.create_subscription(LaserScan, P('scan_topic') or f'{ns}/scan', self.on_scan, qos)
@@ -105,7 +120,8 @@ class VTFollower(PatrolFollower):
         self.dec = csv.writer(self.dec_f)
         self.dec.writerow(['t', 'sim_t', 'leg', 'decision', 'x', 'y', 'z', 'yaw', 'outcome', 'source', 'tries', 'mode', 'snap',
                            'tx', 'ty', 'tz', 'a0', 'a1', 'a2', 'lidar_age', 'depth_age',
-                           *[f'r{k}' for k in range(S.SCAN_BINS)], *[f'h{k}' for k in range(S.SCAN_BINS)]])
+                           *[f'r{k}' for k in range(S.SCAN_BINS)], *[f'h{k}' for k in range(S.SCAN_BINS)],
+                           'scan_dyaw', 'scan_tilt', 'scan_shift'])
         self.leg_f = open(base + '_vt_legs.csv', 'w', newline='')
         self.legw = csv.writer(self.leg_f)
         self.legw.writerow(['lap', 'leg', 'ax', 'ay', 'az', 'bx', 'by', 'bz', 'outcome', 'decisions', 'backtracks', 'climbs',
@@ -114,16 +130,36 @@ class VTFollower(PatrolFollower):
                                f'legs planned online from the sensors, pref {pref}, margin {self.pilot.margin} m')
 
     # --- sensors --------------------------------------------------------------------------------------------
+    def tick(self):
+        if self.lpos is not None and self.lpos.xy_valid and self.lpos.z_valid:
+            self.poses.append((time.monotonic(), *self.world(), self.yaw_enu(), *self.roll_pitch()))
+        super().tick()
+
+    def pose_at(self, t):
+        """the drone's pose (x, y, z, yaw, roll, pitch) recorded closest to time t (monotonic), or None"""
+        if not self.poses:
+            return None
+        return min(self.poses, key=lambda r: abs(r[0] - t))[1:]
+
     def on_scan(self, m):
-        self.lidar_xy = S.laserscan_points(m.ranges, m.angle_min, m.angle_increment, m.range_min, m.range_max)
-        self.t_lidar = time.monotonic()
+        now = time.monotonic()
+        pose = self.pose_at(now - self.latency)
+        if pose is None:
+            return
+        xy = S.laserscan_points(m.ranges, m.angle_min, m.angle_increment, m.range_min, m.range_max)
+        self.lidar_xy = S.level(np.c_[xy, np.zeros(len(xy))], *pose[4:])[:, :2]   # the beams' horizontal reach
+        self.lidar_pose, self.t_lidar = pose, now
 
     def on_cloud(self, m):
+        now = time.monotonic()
+        pose = self.pose_at(now - self.latency)
+        if pose is None:
+            return
         p = point_cloud2.read_points_numpy(m, field_names=('x', 'y', 'z'), skip_nans=True).astype(float)
         if self.cloud_frame == 'optical':                                  # z forward, x right, y down -> FLU
             p = np.c_[p[:, 2], -p[:, 0], -p[:, 1]]
-        self.cloud = p[::self.stride]
-        self.t_depth = time.monotonic()
+        self.cloud = S.level(p[::self.stride], *pose[4:])                  # levelled with the attitude it was taken at
+        self.depth_pose, self.t_depth = pose, now
 
     def roll_pitch(self):
         """roll and pitch (rad) of the body in the FLU convention, from PX4's FRD attitude."""
@@ -140,21 +176,44 @@ class VTFollower(PatrolFollower):
     def sim_s(self):
         return float(self.lpos.timestamp) * 1e-6                          # PX4 time (sim time in SITL)
 
-    def scan(self, now, pos):
-        """the flight scan (ranges, heights, full-resolution beams) at the drone's pose, or None while a sensor is stale."""
+    def scan_quality(self):
+        """(largest |yaw - heading|, largest tilt, largest distance from the waypoint) over the poses the current
+        sensor data was taken at"""
+        poses = [q for q in (self.lidar_pose, self.depth_pose if self.use_depth else None) if q is not None]
+        cur, h = self.pilot.cur, self.pilot.heading
+        dyaw = max((abs(wrap(q[3] - h)) for q in poses), default=math.inf)
+        tilt = max((math.hypot(q[4], q[5]) for q in poses), default=math.inf)
+        shift = max((math.dist(q[:3], cur) for q in poses), default=math.inf)
+        return dyaw, tilt, shift
+
+    def scan(self, now):
+        """the flight scan (ranges, heights, full-resolution beams) at the current waypoint facing the policy's heading,
+        or None while a sensor is stale or its data was not taken level (and, with flow, facing the heading)."""
         if self.lidar_xy is None or now - self.t_lidar > self.max_age:
             return None
-        depth = None
-        if self.use_depth:
-            if self.cloud is None or now - self.t_depth > self.max_age:
-                return None
-            depth = S.level(self.cloud, *self.roll_pitch())
-        lid, yaw, z = self.lidar_xy, self.yaw_enu(), pos[2]
+        if self.use_depth and (self.cloud is None or now - self.t_depth > self.max_age):
+            return None
+        dyaw, tilt, _ = self.scan_quality()
+        if tilt > self.max_tilt or (self.flow and dyaw > self.yaw_tol):
+            return None
         if self.flow:                                                      # as seen from the waypoint, facing its heading
             at = (*self.pilot.cur, self.pilot.heading)
-            lid, depth = reframe(lid, depth, (*pos, yaw), at)
+            lid, _ = reframe(self.lidar_xy, None, self.lidar_pose[:4], at)
+            depth = reframe(None, self.cloud, self.depth_pose[:4], at)[1] if self.use_depth else None
             yaw, z = at[3], at[2]
+        else:                                                              # stopped at the waypoint
+            lid, depth = self.lidar_xy, self.cloud if self.use_depth else None
+            yaw, z = self.lidar_pose[3], self.lidar_pose[2]
         return flight_scan(lid, depth, drone_z=z, margin=self.pilot.margin, yaw=yaw, beams=True)
+
+    # --- feed-forward and the decision point ---------------------------------------------------------------------
+    def ff_active(self):
+        return self.velocity_ff or (self.flow and self.phase == 'PATROL')  # transits as planned, unless velocity_ff
+
+    def extend_ahead(self):
+        if not (self.flow and self.phase == 'PATROL') or self.stop_here:
+            return 0.0
+        return self.speed ** 2 / (2 * self.brake_acc) + 0.3                # before the carrot starts braking
 
     # --- the online PATROL track --------------------------------------------------------------------------------
     def reset_loop(self):
@@ -175,6 +234,7 @@ class VTFollower(PatrolFollower):
         self.t_first = None                                                # sim time of the first decision
         self.fallbacks, self.wait_s, self.blocked_s, self.n_dec = 0, 0.0, 0.0, 0
         self.end_outcome = None
+        self.stop_here = False
         d = np.array(b[:2]) - np.array(a[:2])                              # turn in place to face the goal:
         d = d / max(np.linalg.norm(d), 1e-9)                               # a 1 cm step sets the setpoint yaw
         self.append((a[0] + 0.01 * d[0], a[1] + 0.01 * d[1], a[2]))
@@ -193,7 +253,9 @@ class VTFollower(PatrolFollower):
         self.leg_i += 1
         self.leg_on = False
 
-    def log_decision(self, now, pos, outcome, d, scan):
+    def log_decision(self, now, pos, outcome, d, scan, q=None):
+        if q is None:                                                      # the data's quality w.r.t. the current heading
+            q = self.scan_quality() if self.leg_on else (math.nan,) * 3
         r, h = scan[:2] if scan is not None else (np.full(S.SCAN_BINS, np.nan), np.full(S.SCAN_BINS, np.nan))
         tgt = d.target if d is not None else (math.nan,) * 3
         a = d.action[0].tolist() if d is not None else [math.nan] * 3
@@ -201,7 +263,7 @@ class VTFollower(PatrolFollower):
                            f'{self.yaw_enu():.3f}', outcome, d.source if d else '', d.tries if d else 0,
                            MODES[d.mode] if d else '', int(d.snap) if d else 0, *(f'{v:.3f}' for v in tgt),
                            *(f'{v:.4f}' for v in a), f'{now - self.t_lidar:.2f}', f'{now - self.t_depth:.2f}',
-                           *(f'{v:.4f}' for v in r), *(f'{v:.4f}' for v in h)])
+                           *(f'{v:.4f}' for v in r), *(f'{v:.4f}' for v in h), *(f'{v:.3f}' for v in q)])
 
     def give_up(self, now, pos, scan, why):
         """no way on (blocked for max_block s, or out of decisions): straight to the goal if the scan shows it clear,
@@ -225,7 +287,8 @@ class VTFollower(PatrolFollower):
         if self.loop_done:
             return False
         self.s = min(self.s, self.loop_len)
-        near = self.lookahead if self.flow else self.arrive
+        stop = not self.flow or self.stop_here
+        near = self.arrive if stop else self.lookahead
         if math.dist(pos, self.wp[-1]) > near:                             # still flying to the current end
             self.arrived = None
             return True
@@ -246,13 +309,14 @@ class VTFollower(PatrolFollower):
             if self.pilot.success:                                         # arrived at the goal
                 self.finish_leg('success')
                 return True
-        settled = self.flow or now - self.arrived >= self.settle
-        facing = self.flow or abs(wrap(self.yaw_enu() - self.pilot.heading)) <= self.yaw_tol or now - self.arrived > 3.0
-        if not (settled and facing):
-            return True                                                    # settling / still turning to the heading
-        scan = self.scan(now, pos)
+        if stop:                                                           # stopped at the waypoint: settle, face the heading
+            settled = now - self.arrived >= self.settle
+            facing = abs(wrap(self.yaw_enu() - self.pilot.heading)) <= self.yaw_tol or (not self.flow and now - self.arrived > 3.0)
+            if not (settled and facing):
+                return True
+        scan = self.scan(now)
         if scan is None:
-            return True                                                    # hover until the sensors are fresh
+            return True                                                    # until the sensor data is fresh, level (and facing)
         if self.pilot.over:                                                # out of decisions, not at the goal
             self.give_up(now, pos, scan, 'timeout')
             return True
@@ -269,15 +333,27 @@ class VTFollower(PatrolFollower):
         if self.blocked_since is not None:
             self.blocked_s += now - self.blocked_since
             self.blocked_since = None
+        cur = self.pilot.cur
+        L = math.dist(d.target[:2], cur[:2])
+        if self.flow and math.dist(pos[:2], cur[:2]) > 0.05 and L > 1e-6:
+            # flying through the waypoint, the drone cuts the corner from where it is now onto the new segment
+            k = min(1.0, self.lookahead / L)
+            if not self.pilot.clear(cur + k * (np.asarray(d.target, float) - cur), *scan, start=pos):
+                if not self.stop_here:
+                    self.stop_here = True
+                    self.log_decision(now, pos, 'corner_stop', d, scan)
+                return True                                                # decide again at the waypoint
+        self.stop_here = False
         if self.t_first is None:
             self.t_first = self.sim_s()
         else:
             self.wait_s += self.sim_s() - self.sim_arrived                 # hovering at the waypoint before deciding
         self.fallbacks += d.source != 'policy'
+        q = self.scan_quality()                                            # before the commit changes the heading
         target = self.pilot.commit(d)
         self.n_dec += 1
         self.append(target)
-        self.log_decision(now, pos, 'ok', d, scan)
+        self.log_decision(now, pos, 'ok', d, scan, q)
         self.arrived = None
         return True
 
