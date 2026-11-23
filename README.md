@@ -10,8 +10,9 @@ bounds and the same cost function. The policy proposes paths for an unseen leg i
 compared fairly against the authors' **unmodified** NMOPSO, and the resulting patrol plans are flown
 with 3 drones in **Gazebo + PX4 SITL**.
 
-Everything needed to reproduce the results is here: code, the authors' NMOPSO (unmodified), the
-factory planner, the world, trained models, every NMOPSO run and the flight logs.
+This branch holds the code, the authors' NMOPSO (unmodified), the factory planner, the world and the input
+data. The trained models, every NMOPSO run, the evaluations and the flight logs are kept in the tag
+`main-results` (see *Reproducing the results*).
 
 ## Results
 
@@ -99,7 +100,7 @@ planner/             factory patrol planner (MATLAB): SDF parsing, free-space la
                      zones, 2-opt tours, obstacle cylinders, NMOPSO model
 worlds/factory2.sdf  the Gazebo world
 data/                obstacle model, benchmark legs, plan preview, warm-start seeds, NMOPSO legs used for scaling
-results/             trained policies (ckpt/), NMOPSO runs, evaluations, flight plans and flight records
+results/             the scripts' outputs (empty here; the published ones are in the tag main-results)
 gazebo/              ROS 2 / Gazebo / PX4 SITL demo, set-up and flight scripts
 paper/main.tex       paper draft;  LOOP.md  research log of the improvement loop
 ```
@@ -154,6 +155,16 @@ Different locations can be set with `PX4_DIR` and `PX4_MSGS_WS`; `gazebo/nmopso_
 reads both.
 
 ## Reproducing the results
+
+The trained policies, NMOPSO runs, evaluations, flight plans and flight records behind every table are not on
+the branch: they are kept in the tag [`main-results`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/main-results).
+Restore them into a clone (`.gitignore` keeps `results/` out of commits):
+
+```bash
+git fetch origin tag main-results --no-tags
+git archive main-results results | tar -x
+```
+The commands below expect them; the scripts write their own outputs into `results/`.
 
 ### From the saved runs (Python only, minutes)
 
