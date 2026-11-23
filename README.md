@@ -22,6 +22,20 @@ behind wide obstacles.
   closing a rack aisle, which needs a global replan; three boxes on three legs). Pass: never within 0.3 m of a box,
   every patrol leg flown.
 
+## Trained models, results and configs
+
+This branch holds **code only** (plus the world, the drone model, the flight plans and the input data in `data/`).
+The trained checkpoints, training logs, evaluations, NMOPSO runs, flight records and training configs behind every
+number above are kept in the tag [`global-local-planner-results`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/global-local-planner-results). To use them, restore them into a clone;
+`.gitignore` keeps `configs/` and `results/` out of commits:
+
+```bash
+git fetch origin tag global-local-planner-results --no-tags
+git archive global-local-planner-results configs results | tar -x
+```
+The training (`--config configs/...`), evaluation and flight commands below expect them; the scripts write their
+own outputs into `results/`.
+
 ## Set-up
 
 | Tier | Needed for | Requirements |
