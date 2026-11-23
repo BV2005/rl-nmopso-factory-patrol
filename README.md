@@ -53,12 +53,12 @@ seed 1 unless noted):
 
 This branch holds **code only** (plus the world, the drone model, the flight plans and the input data in `data/`).
 The trained checkpoints, training logs, evaluations, NMOPSO runs, flight records and training configs behind every
-number above are kept in the tag [`physical-ai-robust-rl-results`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/physical-ai-robust-rl-results). To use them, restore them into a clone;
+number above are published as the release [`results-v1`](https://github.com/BV2005/rl-nmopso-factory-patrol/releases/tag/results-v1): one archive for all
+branches, which share these files (`MANIFEST.tsv` lists the files of each branch). Unpack it into a clone;
 `.gitignore` keeps `configs/` and `results/` out of commits:
 
 ```bash
-git fetch origin tag physical-ai-robust-rl-results --no-tags
-git archive physical-ai-robust-rl-results configs results | tar -x
+curl -L https://github.com/BV2005/rl-nmopso-factory-patrol/releases/download/results-v1/configs-and-results.tar.gz | tar -xz
 ```
 The training (`--config configs/...`), evaluation and flight commands below expect them; the scripts write their
 own outputs into `results/`.
