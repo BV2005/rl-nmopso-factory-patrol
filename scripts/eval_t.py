@@ -21,6 +21,7 @@ import torch
 from scipy.io import loadmat
 
 ROOT = Path(__file__).resolve().parent.parent
+(ROOT / "results").mkdir(exist_ok=True)                 # outputs go here (not tracked)
 sys.path.insert(0, str(ROOT))
 from rlpatrol.env_g import EVAL, build_batch, factory2_level  # noqa: E402
 from rlpatrol.env_t import TURN_MAX, KAPPA, flight_metrics  # noqa: E402

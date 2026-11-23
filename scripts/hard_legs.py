@@ -18,6 +18,7 @@ import numpy as np
 from scipy.io import loadmat
 
 ROOT = Path(__file__).resolve().parent.parent
+(ROOT / "results").mkdir(exist_ok=True)                 # outputs go here (not tracked)
 sys.path.insert(0, str(ROOT))
 from rlpatrol.nmopso_cost import DRONE  # noqa: E402
 from rlpatrol.world import DATA, load_world  # noqa: E402
