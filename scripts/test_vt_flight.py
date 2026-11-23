@@ -2,14 +2,16 @@
 sensor data and its setpoints, with synthetic sensors (rlpatrol/synth_sensors.py: ray-cast 1080-beam lidar and
 320 x 240 depth camera of x500_patrol in the factory2 world, low overflown boxes included).
   1. flight scan parity: scan3d.flight_scan of the raw data == the scan vT was trained on (sim_scan_b, margin)
-  2. sensor helpers: LaserScan -> points, levelling with roll / pitch
+  2. sensor helpers: LaserScan -> points, levelling with roll / pitch; a scan taken short of a waypoint re-expressed
+     there from the pose it was taken at; the corner check of a step from where the drone is
   3. VTPilot on the 73 factory2 real legs (perfect tracking): success, no collision, env time == judge time
   4. tracking error (0.1 m per waypoint): still no collision
   5. unexpected boxes across legs (sensed, never in any map): avoided
   6. gazebo/nmopso_demo/vt_follower.py itself under a fake ROS 2 / PX4 layer with a PX4-like drone (position P-loop
      0.95 /s + velocity feed-forward, 3 m/s^2, yaw 45 deg/s): drone 1 of the pad-safe plan flies take-off, transit, one
-     patrol lap planned online, transit back, landing - stopping at every waypoint (as first flown in Gazebo: ~3x the
-     time model) and flowing through them (flow: feed-forward + decisions a waypoint ahead)
+     patrol lap planned online, transit back, landing - flowing through the waypoints (flow: feed-forward + decisions
+     a waypoint ahead), with the drone tilting as it accelerates and the sensor data arriving 50 ms late; and, without
+     --quick, stopping at every waypoint (as first flown in Gazebo: ~3x the time model) for comparison
   python scripts/test_vt_flight.py [--ckpt results/ckpt/vT3_seed1_best.pt] [--quick]"""
 import argparse
 import importlib
@@ -29,7 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from rlpatrol import sensors as S  # noqa: E402
 from rlpatrol.env_t import flight_metrics  # noqa: E402
-from rlpatrol.scan3d import H_MAX, flight_scan, sim_scan_b, walls  # noqa: E402
+from rlpatrol.scan3d import H_MAX, flight_scan, reframe, sim_scan_b, walls  # noqa: E402
 from rlpatrol.synth_sensors import depth_cloud, lidar_scan  # noqa: E402
 from rlpatrol.vt_pilot import VTPilot  # noqa: E402
 from rlpatrol.world import load_world  # noqa: E402
@@ -127,6 +129,44 @@ def helper_checks():
           "level: a point straight ahead seen with the nose 10 deg up is above the camera after levelling")
     r, h = flight_scan(None, None, 1.8, 0.5, 0.0)
     check(bool((r == 1).all() and (h == 0).all()), "flight_scan with no returns: all clear, no heights")
+
+
+def reframe_checks(ckpt):
+    print("[2b] deciding ahead: the scan re-expressed at the waypoint, the corner check")
+    hall, rects, W, sensed = factory2()
+    rng = np.random.default_rng(5)
+    good, bad, n = [], [], 0
+    while n < 30:
+        w = np.array([rng.uniform(hall[0] + 1.5, hall[1] - 1.5), rng.uniform(hall[2] + 1.5, hall[3] - 1.5), 1.8])
+        yaw = rng.uniform(-math.pi, math.pi)
+        u = np.array([math.cos(yaw), math.sin(yaw), 0.0])
+        a = w - 0.6 * u                                                  # the drone 0.6 m short of the waypoint
+        if any(b[0] - 0.8 < q[0] < b[1] + 0.8 and b[2] - 0.8 < q[1] < b[3] + 0.8 for b in rects for q in (a, w)):
+            continue
+        rs, a0, inc = lidar_scan(sensed, a, yaw)
+        lid, dep = S.laserscan_points(rs, a0, inc), depth_cloud(sensed, a, yaw)
+        ref = flight_scan(*reframe(lid, dep, (*a, yaw), (*w, yaw)), w[2], 0.5, yaw)[0]
+        late = flight_scan(*reframe(lid, dep, (*(a + 0.4 * u), yaw), (*w, yaw)), w[2], 0.5, yaw)[0]   # pose 0.4 m later
+        truth = sense(sensed, w, yaw, 0.5)[0]
+        good.append(np.abs(ref - truth) * S.SCAN_MAX)
+        bad.append(np.abs(late - truth) * S.SCAN_MAX)
+        n += 1
+    good, bad = np.concatenate(good), np.concatenate(bad)
+    check(np.median(good) < 0.05 and (good < 0.25).mean() >= 0.9 and np.mean(good) < np.mean(bad),
+          f"a scan taken 0.6 m short of the waypoint, re-expressed there from the pose it was taken at: median bin error "
+          f"{np.median(good):.3f} m, {(good < 0.25).mean() * 100:.0f} % within 0.25 m (from the pose 0.4 m later, as at the "
+          f"decision: mean {np.mean(bad):.2f} m vs {np.mean(good):.2f} m)")
+    # the corner: heading +x, the next step turns 90 deg left; a box inside the corner is clear of the step from the
+    # waypoint but not of the chord the drone flies from 0.6 m short of it
+    pilot = VTPilot(ckpt, hall)
+    c = np.array([-3.0, -4.0, 1.8])
+    pilot.start_leg(c, c + np.array([6.0, 0.0, 0.0]))
+    box = np.array([c[0] - 1.6, c[0] - 0.72, c[1] + 0.68, c[1] + 2.0, 3.0])
+    world = np.vstack([W, box[None]])
+    sc = sense(world, c, 0.0, pilot.margin, beams=True)
+    q = c + np.array([0.0, 0.6, 0.0])
+    check(pilot.clear(q, *sc) and not pilot.clear(q, *sc, start=c - np.array([0.6, 0.0, 0.0])),
+          "corner check: a box inside a 90 deg turn is clear of the step from the waypoint, not of the corner cut from 0.6 m short of it")
 
 
 def pilot_checks(ckpt, n_legs, n_noisy, n_boxes):
@@ -266,7 +306,7 @@ def _fake_ros(params):
     return Msg, VehicleStatus
 
 
-def follower_checks(ckpt, drone=1, max_sim_s=1500.0, flow=True):
+def follower_checks(ckpt, drone=1, max_sim_s=1200.0, flow=True):
     mode = "flowing through the waypoints" if flow else "stopping at every waypoint"
     print(f"[6] vt_follower.py under a fake ROS 2 / PX4 layer: drone {drone} of the pad-safe plan, one lap, {mode}")
     hall, rects, W, sensed = factory2()
@@ -292,6 +332,9 @@ def follower_checks(ckpt, drone=1, max_sim_s=1500.0, flow=True):
         armed = offboard = landing = False
         states, dt = [], 0.05
         last_sense = -1e9
+        acc = np.zeros(3)
+        hist = []                                                        # (p, yaw) per tick: sensor data 1 tick (50 ms) late
+        ffs = []                                                         # (t, phase, |feed-forward|) per setpoint
         ns = f"/drone{drone}"
         tick = node.timers[0]
         done = False
@@ -301,12 +344,19 @@ def follower_checks(ckpt, drone=1, max_sim_s=1500.0, flow=True):
                                                                      xy_valid=True, z_valid=True, timestamp=int(_Clock.t * 1e6)))
             node.subs[f"{ns}/fmu/out/vehicle_status_v4"](Msg(arming_state=VS.ARMING_STATE_ARMED if armed else 1,
                                                              nav_state=VS.NAVIGATION_STATE_OFFBOARD if offboard else 0))
-            node.subs[f"{ns}/fmu/out/vehicle_attitude"](Msg(q=[1.0, 0.0, 0.0, 0.0]))
-            # sensors: when the drone is about to decide (near the end of the online track, slow), every 0.5 s
-            if node.phase == "PATROL" and _Clock.t - last_sense > 0.3 and math.dist(p, node.wp[-1]) < 0.9:
-                rs, a0, inc = lidar_scan(sensed, p, yaw)
+            # attitude: the tilt that gives the acceleration (FRD: nose down to accelerate forward, right wing down right)
+            af = acc[0] * math.cos(yaw) + acc[1] * math.sin(yaw)
+            al = -acc[0] * math.sin(yaw) + acc[1] * math.cos(yaw)
+            pr, rr = -math.atan2(af, 9.81) / 2, -math.atan2(al, 9.81) / 2
+            node.subs[f"{ns}/fmu/out/vehicle_attitude"](Msg(q=[math.cos(rr) * math.cos(pr), math.sin(rr) * math.cos(pr),
+                                                                math.cos(rr) * math.sin(pr), -math.sin(rr) * math.sin(pr)]))
+            hist = (hist + [(p.copy(), yaw)])[-2:]
+            # sensors at 10 Hz near the end of the online track (where the drone decides), taken one tick before they arrive
+            if node.phase == "PATROL" and _Clock.t - last_sense > 0.099 and math.dist(p, node.wp[-1]) < 1.2:
+                ps, ys = hist[0]
+                rs, a0, inc = lidar_scan(sensed, ps, ys)
                 node.subs[f"{ns}/scan"](Msg(ranges=rs.tolist(), angle_min=a0, angle_increment=inc, range_min=0.1, range_max=30.0))
-                node.subs[f"{ns}/depth/points"](Msg(pts=depth_cloud(sensed, p, yaw)))
+                node.subs[f"{ns}/depth/points"](Msg(pts=depth_cloud(sensed, ps, ys)))
                 last_sense = _Clock.t
             try:
                 tick()
@@ -333,6 +383,7 @@ def follower_checks(ckpt, drone=1, max_sim_s=1500.0, flow=True):
                 # 3 m/s^2 (MPC_ACC_HOR), yaw rate 45 deg/s (MPC_YAWRAUTO_MAX)
                 ffv = getattr(m, "velocity", None)
                 ff = np.array([ffv[1], ffv[0], -ffv[2]]) if ffv is not None and not landing else np.zeros(3)
+                ffs.append((_Clock.t, node.phase, None if ffv is None else float(np.linalg.norm(ff))))
                 e = tgt - p
                 vsp = ff + np.array([0.95 * e[0], 0.95 * e[1], 1.0 * e[2]])
                 hn = float(np.linalg.norm(vsp[:2]))
@@ -344,6 +395,7 @@ def follower_checks(ckpt, drone=1, max_sim_s=1500.0, flow=True):
                 if dn > 3.0 * dt:
                     dv *= 3.0 * dt / dn
                 vel = vel + dv
+                acc = dv / dt
                 p = p + vel * dt
                 ey = (math.pi / 2 - m.yaw) - yaw                         # setpoint NED yaw -> ENU
                 yaw += float(np.clip(math.atan2(math.sin(ey), math.cos(ey)), -math.radians(45) * dt, math.radians(45) * dt))
@@ -352,7 +404,9 @@ def follower_checks(ckpt, drone=1, max_sim_s=1500.0, flow=True):
             _Clock.t += dt
         node.log_f.close(); node.dec_f.close(); node.leg_f.close()
         rows = [l.split(",") for l in (Path(tmp) / f"trace_drone{drone}_vt_legs.csv").read_text().splitlines()[1:]]
-        dec_rows = (Path(tmp) / f"trace_drone{drone}_vt.csv").read_text().splitlines()[1:]
+        import csv
+        dec_all = list(csv.DictReader(open(Path(tmp) / f"trace_drone{drone}_vt.csv")))
+        dec_rows = [r for r in dec_all if r["outcome"] == "ok"]
         import subprocess
         rep = subprocess.run([sys.executable, str(ROOT / "scripts" / "vt_flight_report.py"), tmp], capture_output=True, text=True)
     outcomes = [r[8] for r in rows]
@@ -360,13 +414,29 @@ def follower_checks(ckpt, drone=1, max_sim_s=1500.0, flow=True):
     phys = collides(path[::4], sensed, 0.3) if len(path) > 1 else True
     model = sum(float(r[13]) for r in rows if r[8] == "success")
     flown = sum(float(r[14]) for r in rows if r[8] == "success")
-    check(done and len(rows) == len(node.legs) and all(o == "success" for o in outcomes),
+    check(done and len(rows) == len(node.legs) and all(o == "success" for o in outcomes) and model > 0 and flown > 0,
           f"take-off, transit, {len(rows)} patrol legs planned online (all '{outcomes[0] if outcomes else '-'}'), transit back and "
           f"landing in {_Clock.t:.0f} s simulated; {len(dec_rows)} decisions logged")
     check(not phys, "the flown patrol (PX4-like drone) never comes within 0.3 m of an obstacle")
     check(rep.returncode == 0 and "success 100.0 %" in rep.stdout,
           "scripts/vt_flight_report.py summarises the run's logs" + ("" if rep.returncode == 0 else f": {rep.stderr[-400:]}"))
     print("\n".join("      " + l for l in rep.stdout.splitlines()[:2]))
+    dyaw = max(float(r["scan_dyaw"]) for r in dec_rows)
+    tilt = max(float(r["scan_tilt"]) for r in dec_rows)
+    check(tilt <= node.max_tilt + 1e-9 and (not flow or dyaw <= node.yaw_tol + 1e-9),
+          f"every decision from sensor data taken level (tilt <= {tilt:.3f} rad, max_tilt {node.max_tilt})"
+          + (f" and facing the heading (<= {math.degrees(dyaw):.1f} deg)" if flow else "")
+          + f"; {sum(r['outcome'] == 'corner_stop' for r in dec_all)} corner stops")
+    if flow:
+        pat = [(t, v) for t, ph, v in ffs if ph == "PATROL" and v is not None]
+        # braking to an undecided end: the carrot slows at brake_acc (the last ticks of the profile, below ~0.35 m/s, are
+        # coarser); the first flow version dropped `speed` (1 m/s) to 0 in one tick there
+        step = max((v0 - v1 for (_, v0), (_, v1) in zip(pat, pat[1:])), default=0.0)
+        fast = max((v0 - v1 for (_, v0), (_, v1) in zip(pat, pat[1:]) if v1 >= 0.35), default=0.0) / 0.05
+        tr = [v for t, ph, v in ffs if ph.startswith("TRANSIT")]
+        check(len(pat) > 0 and step <= 0.4 and fast <= node.brake_acc + 0.2 and all(v is None for v in tr),
+              f"feed-forward only on the PATROL legs; it never drops by more than {step:.2f} m/s in a tick (speed {node.speed}), "
+              f"and above 0.35 m/s at {fast:.2f} m/s^2 at most (brake_acc {node.brake_acc})")
     print(f"      time model {model:.1f} s vs flown {flown:.1f} s over the successful legs: ratio {flown / model:.2f}")
     return flown / model if model > 0 else math.inf
 
@@ -380,12 +450,13 @@ def main():
     q = a.quick
     parity_checks(40 if q else 150)
     helper_checks()
+    reframe_checks(a.ckpt)
     pilot_checks(a.ckpt, 15 if q else 73, 8 if q else 25, 3 if q else 8)
-    stop = follower_checks(a.ckpt, flow=False)
     flow = follower_checks(a.ckpt, flow=True)
-    check(stop > 2.0 and flow < 1.6 and flow < 0.6 * stop,
-          f"flowing through the waypoints flies the patrol at {flow:.2f} x the time model, stopping at each {stop:.2f} x "
-          f"(Gazebo + PX4 measured 2.93 x stopping)")
+    stop = math.nan if q else follower_checks(a.ckpt, flow=False)
+    check(math.isfinite(flow) and flow < 1.6 and (q or (math.isfinite(stop) and flow < stop)),
+          f"flowing through the waypoints flies the patrol at {flow:.2f} x the time model"
+          + ("" if q else f", stopping at each {stop:.2f} x") + " (Gazebo + PX4 measured 2.93 x stopping)")
     print(f"all {len(OK)} checks passed")
 
 

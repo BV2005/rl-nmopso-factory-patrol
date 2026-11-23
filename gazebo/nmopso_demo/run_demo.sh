@@ -44,6 +44,7 @@ SPEED="${SPEED:-1.0}"
 MODEL="${MODEL:-x500}"                       # x500 (stock, GPS) | x500_patrol (sensor drone)
 SENSOR_CKPT="${SENSOR_CKPT:-}"               # a sensor_obs checkpoint: fly PATROL legs with sensor_follower.py
 VT_CKPT="${VT_CKPT:-}"                       # a vT checkpoint: fly PATROL legs with vt_follower.py
+VT_ARGS="${VT_ARGS:-}"                       # extra vt_follower.py parameters, e.g. "-p flow:=false -p max_tilt:=0.15"
 if [ -n "$SENSOR_CKPT" ]; then
     SENSOR_CKPT="$(realpath "$SENSOR_CKPT")"
     [ "$MODEL" = "x500_patrol" ] || { echo "[run_demo] SENSOR_CKPT needs MODEL=x500_patrol"; exit 1; }
@@ -150,7 +151,7 @@ for h in "${HOMES[@]}"; do
     if [ -n "$VT_CKPT" ]; then
         PYTHONPATH="$REPO/..:$DEMO${PYTHONPATH:+:$PYTHONPATH}" python3 "$DEMO/vt_follower.py" --ros-args \
             -p drone_id:="$ID" -p paths_file:="$PATHS" -p log_file:="$LOGS/trace_drone$ID.csv" -p laps:="$LAPS" \
-            -p speed:="$SPEED" -p ckpt:="$VT_CKPT" -p cloud_frame:="${CLOUD_FRAME:-flu}" \
+            -p speed:="$SPEED" -p ckpt:="$VT_CKPT" -p cloud_frame:="${CLOUD_FRAME:-flu}" $VT_ARGS \
             > "$LOGS/follower_drone$ID.log" 2>&1 &
     elif [ -n "$SENSOR_CKPT" ]; then
         PYTHONPATH="$REPO/..:$DEMO${PYTHONPATH:+:$PYTHONPATH}" python3 "$DEMO/sensor_follower.py" --ros-args \

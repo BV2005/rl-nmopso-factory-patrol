@@ -106,7 +106,8 @@ bash gazebo/spawn_box.sh "$(ls -d gazebo/nmopso_demo/run_logs/* | tail -1)" -10.
 |---|---|---|
 | legs succeeded | `vt_flight_report.py`: `success`, `outcomes` | all `success`; `blocked_*` / `timeout_*` legs need a look in `trace_droneN_vt.csv` |
 | collisions | `flight_check.json` (`any_obstacle_collision`, `any_drone_collision`) | false |
-| time model | `flown / model` | ≈ 1.0–1.3: above 1 by the stop at every waypoint (`settle`, the yaw to the next segment) and PX4's acceleration; much higher means the model misses something |
+| time model | `flown / model` | ≈ 1.0–1.3 with `flow` (above 1 by the slow-downs to yaw at sharp turns, `corner_stop`s and PX4's acceleration); ≈ 2–3 with `flow:=false`; much higher means the model misses something |
+| deciding ahead | `trace_droneN_vt.csv`: `scan_dyaw`, `scan_tilt`, `scan_shift`, `corner_stop` rows | within `yaw_tol` / `max_tilt`; `scan_shift` up to ~`lookahead`; few corner stops |
 | fallbacks | `fallbacks` / `decisions` | small: the policy's own decision was clear in the real scan |
 | scans | `trace_droneN_vt.csv` (`r0..r26`, `h0..h26`) | hovering in the open: no ranges < 0.1; walls appear where expected |
 
@@ -114,10 +115,14 @@ Bring the results home: `tar czf flight_vt.tgz gazebo/nmopso_demo/run_logs/<run>
 
 ## Parameters (`vt_follower.py`, `--ros-args -p name:=value`)
 
-`flow` (true: fly through the waypoints), `lookahead` (0.6 m: decide this far before a waypoint),
+`flow` (true: fly through the waypoints), `lookahead` (0.6 m: decide this far before a waypoint), `max_tilt`
+(0.1 rad: decide only from sensor data taken this level), `sensor_latency` (0.05 s: a sensor message is taken to be
+this old when it arrives), `brake_acc` (1.5 m/s²: with feed-forward the carrot brakes to a stop at a track end that is
+not extended yet), `velocity_ff` (false: feed-forward also on the transits; flow already sends it on the PATROL legs),
 `ckpt` (vT checkpoint), `pref` (3 weights over time, threat, altitude; default 1/3 each), `radius` (0.1 m: scan check
 around the segment, on top of the 0.5 m margin), `samples` (16), `arrive_dist` (0.25 m), `settle` (0.3 s at a
-waypoint before scanning, only without flow), `yaw_tol` (0.15 rad, only without flow), `max_scan_age` (0.5 s), `max_block` (10 s), `cloud_frame`
+waypoint before scanning, only without flow), `yaw_tol` (0.15 rad: the scan's data taken facing the heading this
+closely; without flow the drone's yaw at the waypoint), `max_scan_age` (0.5 s), `max_block` (10 s), `cloud_frame`
 (`flu` / `optical`), `cloud_stride` (1), `use_depth` (true), `zmax_local` (2.6 m: highest climb).
 
 ## Known limits
@@ -130,6 +135,19 @@ waypoint before scanning, only without flow), `yaw_tol` (0.15 rad, only without 
   (0.6 m) of the waypoint, on the scan re-expressed at the waypoint (`scan3d.reframe`), so the drone never stops. In the
   offline test with a PX4-like drone: 2.21 × the time model stopping, 0.96 × flowing. `flow:=false` restores the
   first behaviour; the report's `wait_s` is the time spent hovering at waypoints.
+- **What deciding ahead must not lose** (review of the first flow version). Stopping at a waypoint gave a scan taken
+  level, at the waypoint, facing the heading. With `flow`:
+  - each sensor message is placed at the pose it was taken at (the drone's pose `sensor_latency` before it arrived),
+    not the pose at the decision; the remaining error is the latency not covered by `sensor_latency` × speed;
+  - a decision waits for data taken facing the heading (`yaw_tol`: the depth camera is the only sensor below the
+    lidar plane) and level (`max_tilt`; the lidar points are also levelled). After a sharp turn the drone may
+    therefore slow down at the next waypoint while it yaws;
+  - the step is also checked from where the drone is (the corner it cuts); if that is not clear it stops at the
+    waypoint (`corner_stop` in `_vt.csv`);
+  - parts of the scene visible from the waypoint but hidden from the drone 0.6 m short of it are still unknown (and
+    treated as free, as everything outside the sensors' view);
+  - `_vt.csv` logs per decision the largest yaw offset, tilt and distance from the waypoint of the data used
+    (`scan_dyaw`, `scan_tilt`, `scan_shift`).
 - **Unobservable zones.** See above: parts of obstacles outside the sensors' view are not known in flight.
 - **One policy per drone, no coordination.** The drones keep `main`'s zoning, transit layer and yield rule; vT does
   not see the other drones (multi-drone RL is the next step).
