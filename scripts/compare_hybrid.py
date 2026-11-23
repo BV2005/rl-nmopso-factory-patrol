@@ -16,6 +16,7 @@ from scipy.io import loadmat
 from scipy.stats import wilcoxon
 
 ROOT = Path(__file__).resolve().parent.parent
+(ROOT / "results").mkdir(exist_ok=True)                 # outputs go here (not tracked)
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "scripts"))
 from evaluate import SCALE, TIE, feasible_front, hv  # noqa: E402
 from rlpatrol.metrics import add_eps, igd_plus, short_safe  # noqa: E402
