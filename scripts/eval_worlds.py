@@ -27,6 +27,7 @@ import torch
 from scipy.io import loadmat
 
 ROOT = Path(__file__).resolve().parent.parent
+(ROOT / "results").mkdir(exist_ok=True)                 # outputs go here (not tracked)
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 from rlpatrol.cost3d import cost3d  # noqa: E402
