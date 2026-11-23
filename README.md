@@ -77,6 +77,20 @@ time on each method's own successes:
   **0.89 ×** the time model flowing vs 2.30 × stopping, 22/22 legs, no collision. **The Gazebo rerun with flow is
   still to be done.**
 
+## Trained models, results and configs
+
+This branch holds **code only** (plus the world, the drone model, the flight plans and the input data in `data/`).
+The trained checkpoints, training logs, evaluations, NMOPSO runs, flight records and training configs behind every
+number above are kept in the tag [`time-optimal-rl-results`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/time-optimal-rl-results). To use them, restore them into a clone;
+`.gitignore` keeps `configs/` and `results/` out of commits:
+
+```bash
+git fetch origin tag time-optimal-rl-results --no-tags
+git archive time-optimal-rl-results configs results | tar -x
+```
+The training (`--config configs/...`), evaluation and flight commands below expect them; the scripts write their
+own outputs into `results/`.
+
 ## Set-up
 
 | Tier | Needed for | Requirements |
