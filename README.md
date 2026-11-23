@@ -49,6 +49,20 @@ seed 1 unless noted):
 - vS trains in 10.7 min on an RTX 5090 (2000 iterations) and plans a leg in ~0.5 s.
 - Checkpoints `results/ckpt/vS*_seed1.pt`; logs `results/runs/vS*_seed1.*`; evaluations `results/eval_vS*_seed1_*.json`.
 
+## Trained models, results and configs
+
+This branch holds **code only** (plus the world, the drone model, the flight plans and the input data in `data/`).
+The trained checkpoints, training logs, evaluations, NMOPSO runs, flight records and training configs behind every
+number above are kept in the tag [`physical-ai-robust-rl-results`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/physical-ai-robust-rl-results). To use them, restore them into a clone;
+`.gitignore` keeps `configs/` and `results/` out of commits:
+
+```bash
+git fetch origin tag physical-ai-robust-rl-results --no-tags
+git archive physical-ai-robust-rl-results configs results | tar -x
+```
+The training (`--config configs/...`), evaluation and flight commands below expect them; the scripts write their
+own outputs into `results/`.
+
 ## Set-up
 
 | Tier | Needed for | Requirements |
