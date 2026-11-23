@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+(ROOT / "results").mkdir(exist_ok=True)                 # outputs go here (not tracked)
 KEEP = ("hv_rl", "hv_straight", "rl_legs_with_feasible", "legs")
 
 

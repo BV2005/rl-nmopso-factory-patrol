@@ -100,9 +100,10 @@ planner/             factory patrol planner (MATLAB): SDF parsing, free-space la
                      zones, 2-opt tours, obstacle cylinders, NMOPSO model
 worlds/factory2.sdf  the Gazebo world
 data/                obstacle model, benchmark legs, plan preview, warm-start seeds, NMOPSO legs used for scaling
-results/             the scripts' outputs (empty here; the published ones are in the release results-v1)
+results/             the scripts' outputs (created when they run, not tracked; the published ones are in the
+                     release results-v1)
 gazebo/              ROS 2 / Gazebo / PX4 SITL demo, set-up and flight scripts
-paper/main.tex       paper draft;  LOOP.md  research log of the improvement loop
+LOOP.md              research log of the improvement loop
 ```
 
 ## Set-up
