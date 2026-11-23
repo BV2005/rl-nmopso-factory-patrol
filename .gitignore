@@ -21,6 +21,5 @@ results/runs/*_runner.out
 Thumbs.db
 # outputs and training configs are not tracked: the published ones are in the release results-v1
 # (curl -L https://github.com/BV2005/rl-nmopso-factory-patrol/releases/download/results-v1/configs-and-results.tar.gz | tar -xz)
-results/*
-!results/.gitkeep
+results/
 configs/

@@ -27,6 +27,7 @@ import torch
 from scipy.io import loadmat, savemat
 
 ROOT = Path(__file__).resolve().parent.parent
+(ROOT / "results").mkdir(exist_ok=True)                 # outputs go here (not tracked)
 sys.path.insert(0, str(ROOT))
 from rlpatrol.env import F_SCALE, PathEnv  # noqa: E402
 from rlpatrol.metrics import add_eps, hypervolume, igd_plus, nondominated, short_safe  # noqa: E402
