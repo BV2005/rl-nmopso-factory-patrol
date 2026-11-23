@@ -10,3 +10,16 @@ gazebo/nmopso_demo/run_logs/
 # training snapshots (results/ckpt/<run>_itNNNN.pt) and training queue outputs
 results/ckpt/*_it[0-9][0-9][0-9][0-9].pt
 results/runs/*_runner.out
+# local archives, scratch notes and editor / OS files
+*.tgz
+*.tar.gz
+*.zip
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+# outputs are not tracked: the published ones are in the tag main-results
+# (restore: git archive main-results results | tar -x)
+results/*
+!results/.gitkeep
+configs/
