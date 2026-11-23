@@ -11,9 +11,6 @@ gazebo/nmopso_demo/run_logs/
 results/ckpt/*_it[0-9][0-9][0-9][0-9].pt
 results/runs/*_runner.out
 
-# evaluate.py solution sets of later policies: rebuilt in minutes from the checkpoints (scripts/evaluate.py);
-# main's published v0 / v1 / v2 sets (and v2's MATLAB re-score, matlab/eval_mycost.m) stay tracked
-results/rl_solutions_*.mat
 # local archives, scratch notes and editor / OS files
 *.tgz
 *.tar.gz
@@ -22,3 +19,8 @@ results/rl_solutions_*.mat
 .idea/
 .DS_Store
 Thumbs.db
+# outputs and training configs are not tracked: the published ones are in the tag generalizable-rl-results
+# (restore: git archive <tag> configs results | tar -x)
+results/*
+!results/.gitkeep
+configs/

@@ -41,6 +41,20 @@ vG4 = box collision model + review fixes, 2 seeds (`scripts/eval_worlds.py`):
 - Checkpoints `results/ckpt/vG4_box_seed*.pt` (earlier rounds: `vG_p*`, `vG2*`, `vG3_*`); logs
   `results/runs/vG*`; evaluations `results/eval_g_*.json`.
 
+## Trained models, results and configs
+
+This branch holds **code only** (plus the world, the drone model, the flight plans and the input data in `data/`).
+The trained checkpoints, training logs, evaluations, NMOPSO runs, flight records and training configs behind every
+number above are kept in the tag [`generalizable-rl-results`](https://github.com/BV2005/rl-nmopso-factory-patrol/tree/generalizable-rl-results). To use them, restore them into a clone;
+`.gitignore` keeps `configs/` and `results/` out of commits:
+
+```bash
+git fetch origin tag generalizable-rl-results --no-tags
+git archive generalizable-rl-results configs results | tar -x
+```
+The training (`--config configs/...`), evaluation and flight commands below expect them; the scripts write their
+own outputs into `results/`.
+
 ## Set-up
 
 | Tier | Needed for | Requirements |
